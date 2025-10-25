@@ -1,0 +1,118 @@
+name: Update Gist (Serie A)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # ogni 30 minuti (modifica se vuoi)
+  workflow_dispatch: {}       # avvio manuale
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run inline Node (no deps)
+        shell: bash
+        env:
+          GIST_ID:    ${{ secrets.GIST_ID }}        # <-- secret
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}     # <-- secret (PAT classic con scope gist)
+          GIST_FILE:  Classifica.json               # nome file dentro al Gist
+        run: |
+          node - <<'NODE'
+          const ESPN = "https://www.espn.com/soccer/standings/_/league/ita.1";
+          const SKY  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
+          const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
+          const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
+
+          if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
+
+          async function fetchText(url){
+            const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
+            if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+            return r.text();
+          }
+
+          // ---- mapping nomi squadra ----
+          const rmAccents = s => s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+          const canon = s => rmAccents(String(s||"").toLowerCase())
+            .replace(/\b(ac|as|ss|ssc|us|fc|bc|cfc)\b/g, " ")
+            .replace(/\b(calcio|football|club)\b/g, " ")
+            .replace(/[^a-z0-9\s]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          const TEAM_MAP = new Map(Object.entries({
+            "inter milan":"Inter","internazionale":"Inter","inter":"Inter",
+            "ac milan":"Milan","milan":"Milan",
+            "ssc napoli":"Napoli","napoli":"Napoli",
+            "juventus":"Juventus","as roma":"Roma","roma":"Roma",
+            "ss lazio":"Lazio","lazio":"Lazio","atalanta bergamo":"Atalanta","atalanta":"Atalanta",
+            "bologna fc":"Bologna","bologna":"Bologna","fiorentina":"Fiorentina","torino":"Torino",
+            "udinese calcio":"Udinese","udinese":"Udinese","lecce":"Lecce","sassuolo":"Sassuolo",
+            "cagliari":"Cagliari","hellas verona":"Verona","verona":"Verona",
+            "genoa cfc":"Genoa","genoa":"Genoa","monza":"Monza","empoli":"Empoli",
+            "salernitana":"Salernitana","frosinone":"Frosinone","spezia":"Spezia","venezia":"Venezia",
+            "pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
+          }));
+          const mapTeam = name => TEAM_MAP.get(canon(name)) || name.trim();
+
+          function parseEspn(html){
+            const teams = [];
+            const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
+            let m;
+            while ((m = re.exec(html)) && teams.length < 20) {
+              const name = m[1].replace(/\s+/g," ").trim();
+              if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(mapTeam(name));
+            }
+            if (teams.length < 10) throw new Error("ESPN parsing failed");
+            return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
+          }
+
+          function parseSky(html){
+            let best = null;
+            const rowRe = /<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>\s*<td[^>]*>(.*?)<\/td>/gims;
+            let m;
+            while ((m = rowRe.exec(html))) {
+              const name  = m[1].replace(/<[^>]+>/g,"").replace(/\s+/g," ").trim();
+              const goals = Number((m[2].replace(/<[^>]+>/g,"").match(/\d+/)||[])[0]);
+              if (name && Number.isFinite(goals)) if (!best || goals > best.goals) best = { name, goals };
+            }
+            if (best) return { capo_actual: [best.name], goals: best.goals, _source:"sky" };
+            const flat = html.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+            const alt = flat.match(/\b1\s+([A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]{3,})\s+(\d{1,2})\b/);
+            if (alt) return { capo_actual: [alt[1].trim()], goals: Number(alt[2]), _source:"sky_alt" };
+            return { capo_actual: [], goals: null, _source: "none" };
+          }
+
+          async function updateGist(payload){
+            const url = `https://api.github.com/gists/${GIST_ID}`;
+            const body = { files: { [GIST_FILE || "Classifica.json"]: { content: JSON.stringify(payload, null, 2) } } };
+            const r = await fetch(url, {
+              method: "PATCH",
+              headers: {
+                "authorization": `token ${GIST_TOKEN}`,
+                "accept": "application/vnd.github+json",
+                "content-type": "application/json",
+                "user-agent": "seriea-gist-action"
+              },
+              body: JSON.stringify(body)
+            });
+            if (!r.ok) throw new Error(`Gist PATCH ${r.status}: ${await r.text()}`);
+            return r.json();
+          }
+
+          (async () => {
+            try {
+              const [htmlStand, htmlSky] = await Promise.all([fetchText(ESPN), fetchText(SKY)]);
+              const stand = parseEspn(htmlStand);
+              const capo  = parseSky(htmlSky);
+              const payload = {
+                teams: stand.teams.slice(0,20),
+                pos_real: stand.pos_real.slice(0,20),
+                capo_actual: capo.capo_actual || [],
+                goals: capo.goals ?? null,
+                synced_at: new Date().toISOString(),
+                _sources: { standings: stand._source, scorers: capo._source }
+              };
+              const out = await updateGist(payload);
+              console.log("Gist updated:", out.id, out.updated_at, payload._sources);
+            } catch (e) { console.error("Sync failed:", e?.message || e); process.exit(1); }
+          })();
+          NODE
