@@ -1,228 +1,163 @@
-# .github/workflows/seriea-gist.yml
-name: Update Gist (Serie A)
+# .github/workflows/seriea-gist.yml  (SOLO: blocco "Run inline Node")
+- name: Run inline Node (fix scorers + manual override, Sky text parser)
+  shell: bash
+  env:
+    GIST_ID:    ${{ secrets.GIST_ID }}
+    GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+    GIST_FILE:  Classifica.json
+  run: |
+    node - <<'NODE'
+    const ESPN = "https://www.espn.com/soccer/standings/_/league/ita.1";
+    const SKY  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
+    const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
+    const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
+    if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
 
-on:
-  schedule:
-    - cron: "*/20 * * * 5"   # Venerdì (UTC)
-    - cron: "*/20 * * * 6"   # Sabato  (UTC)
-    - cron: "*/20 * * * 0"   # Domenica(UTC)
-    - cron: "*/20 * * * 1"   # Lunedì  (UTC)
-  workflow_dispatch: {}
+    async function fetchText(url){
+      const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
+      if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+      return r.text();
+    }
+    async function gh(url, opt={}) {
+      const r = await fetch(url, {
+        ...opt,
+        headers: {
+          "authorization": `token ${GIST_TOKEN}`,
+          "accept": "application/vnd.github+json",
+          "user-agent": "seriea-gist-action",
+          ...(opt.headers||{})
+        }
+      });
+      if (!r.ok) throw new Error(`${opt.method||"GET"} ${url} -> ${r.status}`);
+      return r;
+    }
+    async function readCurrent(){
+      const j = await (await gh(`https://api.github.com/gists/${GIST_ID}`)).json();
+      const f = j.files[GIST_FILE || "Classifica.json"];
+      if (!f || !f.content) return {};
+      try { return JSON.parse(f.content); } catch { return {}; }
+    }
+    async function writeGist(payload){
+      const body = { files: { [GIST_FILE || "Classifica.json"]: { content: JSON.stringify(payload, null, 2) } } };
+      await gh(`https://api.github.com/gists/${GIST_ID}`, {
+        method: "PATCH",
+        headers: { "content-type":"application/json" },
+        body: JSON.stringify(body)
+      });
+    }
 
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run inline Node (standings+scorers ESPN, fallback SKY; preserve goals)
-        shell: bash
-        env:
-          GIST_ID:    ${{ secrets.GIST_ID }}
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_FILE:  Classifica.json
-        run: |
-          node - <<'NODE'
-          const ESPN_STAND = "https://www.espn.com/soccer/standings/_/league/ita.1";
-          const ESPN_SCORERS_MAIN = "https://www.espn.com/soccer/stats/_/league/ita.1";
-          const ESPN_SCORERS_FEAT = "https://africa.espn.com/football/stats/_/league/ITA.1/view/scoring/device/featurephone/italian-serie-a";
-          const SKY_SCORERS = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
-          const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
-          const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
-          if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
+    // ---------- util ----------
+    const rmAccents = s => s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+    const canon = s => rmAccents(String(s||"").toLowerCase())
+      .replace(/\b(ac|as|ss|ssc|us|fc|bc|cfc)\b/g, " ")
+      .replace(/\b(calcio|football|club)\b/g, " ")
+      .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    const TEAM_MAP = new Map(Object.entries({
+      "inter milan":"Inter","internazionale":"Inter","inter":"Inter",
+      "ac milan":"Milan","milan":"Milan","ssc napoli":"Napoli","napoli":"Napoli","juventus":"Juventus",
+      "as roma":"Roma","roma":"Roma","ss lazio":"Lazio","lazio":"Lazio","atalanta bergamo":"Atalanta","atalanta":"Atalanta",
+      "bologna fc":"Bologna","bologna":"Bologna","fiorentina":"Fiorentina","torino":"Torino",
+      "udinese calcio":"Udinese","udinese":"Udinese","lecce":"Lecce","sassuolo":"Sassuolo","cagliari":"Cagliari",
+      "hellas verona":"Verona","verona":"Verona","genoa cfc":"Genoa","genoa":"Genoa",
+      "monza":"Monza","empoli":"Empoli","salernitana":"Salernitana","frosinone":"Frosinone",
+      "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
+    }));
+    const mapTeam = n => TEAM_MAP.get(canon(n)) || n.trim();
 
-          async function fetchText(url){
-            const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" }});
-            if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
-            return r.text();
+    function parseEspnStandings(html){
+      const teams = [];
+      const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
+      let m;
+      while ((m = re.exec(html)) && teams.length < 20) {
+        const name = m[1].replace(/\s+/g," ").trim();
+        if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(mapTeam(name));
+      }
+      if (teams.length < 10) throw new Error("ESPN parsing failed");
+      return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
+    }
+
+    // ---------- SKY scorers: PARSER TESTUALE ROBUSTO ----------
+    // La pagina espone “Pos Calciatore Gol Rigori Testa In area Fuori area ...”
+    // Estraggo testo pulito e cerco righe "pos nome gol r1 r2 r3 r4".
+    const STRIP = s => s.replace(/<script[\s\S]*?<\/script>/gi," ")
+                        .replace(/<style[\s\S]*?<\/style>/gi," ")
+                        .replace(/<[^>]+>/g," ")
+                        .replace(/\u00A0/g," ")
+                        .replace(/\s+/g," ")
+                        .trim();
+    const plausibleName = n => {
+      const s = String(n||"").trim();
+      if (!s) return false;
+      if (s.length < 2 || s.length > 40) return false;
+      return /^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(s);
+    };
+    function parseSkyScorers(html){
+      const text = STRIP(html);
+      const startKey = "Classifica Marcatori Serie A";
+      const endKey   = "Video In evidenza";
+      let seg = text;
+      const i0 = text.indexOf(startKey);
+      if (i0 >= 0) {
+        const i1 = text.indexOf(endKey, i0+startKey.length);
+        seg = text.slice(i0, i1 > i0 ? i1 : undefined);
+      }
+      // pos  name  goals  r1 r2 r3 r4
+      const re = /(\d{1,3})\s+([A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]{2,40}?)\s+(\d{1,2})\s+\d+\s+\d+\s+\d+\s+\d+/gu;
+      let m, rows = [];
+      while ((m = re.exec(seg))) {
+        const pos = parseInt(m[1],10);
+        const name = m[2].replace(/\s+/g," ").trim();
+        const goals = parseInt(m[3],10);
+        if (!Number.isFinite(goals) || !plausibleName(name)) continue;
+        rows.push({pos, name, goals});
+      }
+      if (!rows.length) return { capo_actual:[], goals:null, _source:"sky_v4_fail" };
+      const maxGoals = rows.reduce((a,b)=>Math.max(a,b.goals), 0);
+      const names = [...new Set(rows.filter(r=>r.goals===maxGoals).map(r=>r.name))];
+      return { capo_actual:names.slice(0,4), goals:maxGoals, _source:"sky_v4_text" };
+    }
+
+    (async () => {
+      try {
+        const current = await readCurrent();
+
+        // standings
+        const htmlStand = await fetchText(ESPN);
+        const stand = parseEspnStandings(htmlStand);
+
+        // scorers: manuale > Sky > mantieni precedente
+        let capo;
+        if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
+          const goalsM = Number(current.goals_manual);
+          capo = { capo_actual: current.capo_manual, goals: Number.isFinite(goalsM) ? goalsM : null, _source: "manual" };
+        } else {
+          try {
+            const htmlSky = await fetchText(SKY);
+            capo = parseSkyScorers(htmlSky);
+          } catch(e) {
+            capo = { capo_actual:[], goals:null, _source:"sky_http_fail" };
           }
-          async function gh(url, opt={}) {
-            const r = await fetch(url, {
-              ...opt,
-              headers: {
-                "authorization": `token ${GIST_TOKEN}`,
-                "accept": "application/vnd.github+json",
-                "user-agent": "seriea-gist-action",
-                ...(opt.headers||{})
-              }
-            });
-            if (!r.ok) throw new Error(`${opt.method||"GET"} ${url} -> ${r.status}`);
-            return r;
-          }
-          async function readCurrent(){
-            const j = await (await gh(`https://api.github.com/gists/${GIST_ID}`)).json();
-            const f = j.files[GIST_FILE || "Classifica.json"];
-            if (!f || !f.content) return {};
-            try { return JSON.parse(f.content); } catch { return {}; }
-          }
-          async function writeGist(payload){
-            const body = { files: { [GIST_FILE || "Classifica.json"]: { content: JSON.stringify(payload, null, 2) } } };
-            await gh(`https://api.github.com/gists/${GIST_ID}`, {
-              method: "PATCH",
-              headers: { "content-type":"application/json" },
-              body: JSON.stringify(body)
-            });
-          }
+        }
 
-          // ---------- utils ----------
-          const rmAccents = s => String(s||"").normalize("NFD").replace(/\p{Diacritic}/gu, "");
-          const canon = s => rmAccents(String(s||"").toLowerCase())
-            .replace(/\b(ac|as|ss|ssc|us|fc|bc|cfc)\b/g, " ")
-            .replace(/\b(calcio|football|club)\b/g, " ")
-            .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-          const strip = s => String(s||"").replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\s\S]*?<\/style>/gi,"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
-          const lastName = name => {
-            const clean = strip(name).replace(/\s+/g, " ").trim();
-            if (!clean) return "";
-            const parts = clean.split(" ");
-            return parts[parts.length-1];
-          };
-          const isInt = v => Number.isFinite(v) && Math.floor(v)===v && v>=0;
+        // non azzerare mai il valore precedente se non ho un numero nuovo
+        const prevGoals = Number.isFinite(Number(current.goals)) ? Number(current.goals) : null;
+        const newGoals  = Number.isFinite(Number(capo.goals)) ? Number(capo.goals) : null;
 
-          // ---------- mapping nomi squadra ----------
-          const TEAM_MAP = new Map(Object.entries({
-            "inter milan":"Inter","internazionale":"Inter","inter":"Inter",
-            "ac milan":"Milan","milan":"Milan","ssc napoli":"Napoli","napoli":"Napoli","juventus":"Juventus",
-            "as roma":"Roma","roma":"Roma","ss lazio":"Lazio","lazio":"Lazio","atalanta bergamo":"Atalanta","atalanta":"Atalanta",
-            "bologna fc":"Bologna","bologna":"Bologna","fiorentina":"Fiorentina","torino":"Torino",
-            "udinese calcio":"Udinese","udinese":"Udinese","lecce":"Lecce","sassuolo":"Sassuolo","cagliari":"Cagliari",
-            "hellas verona":"Verona","verona":"Verona","genoa cfc":"Genoa","genoa":"Genoa",
-            "monza":"Monza","empoli":"Empoli","salernitana":"Salernitana","frosinone":"Frosinone",
-            "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
-          }));
-          const mapTeam = n => TEAM_MAP.get(canon(n)) || String(n||"").trim();
+        const payload = {
+          ...current,
+          teams: stand.teams.slice(0,20),
+          pos_real: stand.pos_real.slice(0,20),
+          capo_actual: (capo.capo_actual || []).filter(Boolean),
+          goals: (newGoals !== null ? newGoals : prevGoals),
+          synced_at: new Date().toISOString(),
+          _sources: { standings: stand._source, scorers: capo._source }
+        };
 
-          // ---------- Standings ESPN ----------
-          function parseEspnStandings(html){
-            const teams = [];
-            const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
-            let m;
-            while ((m = re.exec(html)) && teams.length < 20) {
-              const name = m[1].replace(/\s+/g," ").trim();
-              if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(mapTeam(name));
-            }
-            if (teams.length < 10) throw new Error("ESPN standings parsing failed");
-            return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
-          }
-
-          // ---------- Scorers: ESPN (featurephone) ----------
-          function parseEspnScorersFeature(html){
-            const txt = strip(html);
-            const re = /\b\d+\s*=?\s*([A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ.'-]*(?:\s+[A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ.'-]*)+)\s+(\d{1,3})\b/g;
-            const rows = []; let m;
-            while ((m = re.exec(txt))) {
-              const full = m[1].replace(/\s+/g," ").trim();
-              const goals = Number(m[2]);
-              if (!full || !Number.isFinite(goals)) continue;
-              rows.push({ name: full, goals });
-            }
-            if (!rows.length) return { capo_actual: [], goals: null, _source: "espn_feat_fail" };
-            const max = rows.reduce((a,b)=> Math.max(a,b.goals), 0);
-            const leaders = rows.filter(r=>r.goals===max).map(r=> lastName(r.name));
-            const uniq = Array.from(new Set(leaders.filter(Boolean)));
-            return { capo_actual: uniq, goals: max, _source: "espn_feat" };
-          }
-
-          // ---------- Scorers: ESPN (pagina principale) ----------
-          function parseEspnScorersMain(html){
-            const text = html;
-            const rows = [];
-            const re = /<tr[^>]*>[\s\S]*?<a[^>]+player[^>]*>([^<]+)<\/a>[\s\S]*?(?:<td[^>]*>\s*\d{1,3}\s*<\/td>[\s\S]*?){1,3}?<td[^>]*>\s*(\d{1,3})\s*<\/td>[\s\S]*?<\/tr>/gi;
-            let m;
-            while ((m = re.exec(text))) {
-              const full = strip(m[1]);
-              const goals = Number(m[2]);
-              if (!full || !Number.isFinite(goals)) continue;
-              rows.push({ name: full, goals });
-            }
-            if (!rows.length){
-              const flat = strip(text);
-              const re2 = /\b([A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ.'-]+(?:\s+[A-ZÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ.'-]+)+)\b(?:[^0-9]{0,40})\b(\d{1,3})\b/g;
-              let k; while((k = re2.exec(flat))){
-                const full = k[1]; const g = Number(k[2]);
-                if (!full || !Number.isFinite(g)) continue;
-                rows.push({ name: full, goals: g });
-              }
-            }
-            if (!rows.length) return { capo_actual: [], goals: null, _source: "espn_main_fail" };
-            const max = rows.reduce((a,b)=> Math.max(a,b.goals), 0);
-            const leaders = rows.filter(r=>r.goals===max).map(r=> lastName(r.name));
-            const uniq = Array.from(new Set(leaders.filter(Boolean)));
-            return { capo_actual: uniq, goals: max, _source: "espn_main" };
-          }
-
-          // ---------- Scorers: SKY ----------
-          const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
-          const plausible = name => {
-            const n = strip(name);
-            if (!n || BAD.test(n)) return false;
-            if (n.length < 3 || n.length > 40) return false;
-            if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(n)) return false;
-            return n.split(/\s+/).length <= 4;
-          };
-          function parseSkyScorers(html){
-            const row1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
-            if (row1) {
-              const name = strip(row1[1]); const goals = Number(row1[2]);
-              if (plausible(name)) return { capo_actual:[lastName(name)], goals, _source:"sky_v3" };
-            }
-            let best=null; const leaders=[];
-            const re=/<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
-            let m; while((m=re.exec(html))){
-              const name=strip(m[1]); const goals=Number(m[2]);
-              if (!Number.isFinite(goals) || !plausible(name)) continue;
-              if (!best || goals>best.goals) { best={goals}; leaders.length=0; leaders.push(lastName(name)); }
-              else if (best && goals===best.goals) leaders.push(lastName(name));
-            }
-            if (best) return { capo_actual:Array.from(new Set(leaders)), goals:best.goals, _source:"sky_v3" };
-            return { capo_actual:[], goals:null, _source:"sky_fail" };
-          }
-
-          async function getScorers(current){
-            if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
-              const goalsM = Number(current.goals_manual);
-              return {
-                capo_actual: current.capo_manual.map(s=>String(s||"").trim()).filter(Boolean),
-                goals: Number.isFinite(goalsM) ? goalsM : (isInt(current.goals) ? current.goals : null),
-                _source: "manual"
-              };
-            }
-            try { const h = await fetchText(ESPN_SCORERS_FEAT); const r = parseEspnScorersFeature(h);
-              if (r.capo_actual.length && isInt(r.goals)) return r; } catch(_){}
-            try { const h = await fetchText(ESPN_SCORERS_MAIN); const r = parseEspnScorersMain(h);
-              if (r.capo_actual.length && isInt(r.goals)) return r; } catch(_){}
-            try { const h = await fetchText(SKY_SCORERS); const r = parseSkyScorers(h);
-              if (r.capo_actual.length && isInt(r.goals)) return r; } catch(_){}
-            return { capo_actual: [], goals: null, _source: "none" };
-          }
-
-          (async () => {
-            try {
-              const current = await readCurrent();
-              const htmlStand = await fetchText(ESPN_STAND);
-              const stand = parseEspnStandings(htmlStand);
-              const scorers = await getScorers(current);
-
-              const finalCapo = (scorers.capo_actual && scorers.capo_actual.length)
-                ? scorers.capo_actual.slice(0,5)
-                : (Array.isArray(current.capo_actual) ? current.capo_actual : []);
-
-              const prevGoals = isInt(current.goals) ? Number(current.goals) : null;
-              const finalGoals = isInt(scorers.goals) ? Number(scorers.goals) : prevGoals;
-
-              const payload = {
-                ...current,
-                teams: stand.teams.slice(0,20),
-                pos_real: stand.pos_real.slice(0,20),
-                capo_actual: finalCapo,
-                goals: (finalGoals==null ? null : finalGoals),
-                synced_at: new Date().toISOString(),
-                _sources: { standings: stand._source, scorers: scorers._source }
-              };
-
-              await writeGist(payload);
-              console.log("Gist updated ✓", payload._sources, "capo:", payload.capo_actual, "goals:", payload.goals);
-            } catch (e) {
-              console.error("Sync failed:", e?.message || e);
-              process.exit(1);
-            }
-          })();
-          NODE
+        await writeGist(payload);
+        console.log("Gist updated OK.", payload._sources, "capo:", payload.capo_actual, "goals:", payload.goals);
+      } catch (e) {
+        console.error("Sync failed:", e?.message || e);
+        process.exit(1);
+      }
+    })();
+    NODE
