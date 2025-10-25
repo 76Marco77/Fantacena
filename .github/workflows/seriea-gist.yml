@@ -3,7 +3,10 @@ name: Update Gist (Serie A)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"     # ogni 30 minuti
+    - cron: "*/20 * * * 5"   # Venerdì (UTC)
+    - cron: "*/20 * * * 6"   # Sabato  (UTC)
+    - cron: "*/20 * * * 0"   # Domenica(UTC)
+    - cron: "*/20 * * * 1"   # Lunedì  (UTC)
   workflow_dispatch: {}
 
 jobs:
@@ -87,7 +90,7 @@ jobs:
             return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
           }
 
-          // ---------- Sky scorers: parser robusto + filtri ----------
+          // ---------- Sky scorers: parser robusto + override manuale ----------
           const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
           const strip = s => s.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const plausible = name => {
@@ -98,13 +101,11 @@ jobs:
             return n.split(/\s+/).length <= 4;
           };
           function parseSkyScorers(html){
-            // 1) Riga con posizione = 1
             const row1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
             if (row1) {
               const name = strip(row1[1]); const goals = Number(row1[2]);
               if (plausible(name)) return { capo_actual:[name], goals, _source:"sky_v3" };
             }
-            // 2) Fallback: scegli la riga valida con più gol
             let best=null; const re=/<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
             let m; while((m=re.exec(html))){
               const name=strip(m[1]); const goals=Number(m[2]);
@@ -118,11 +119,9 @@ jobs:
           (async () => {
             try {
               const current = await readCurrent();   // per override manuale
-              // standings
               const htmlStand = await fetchText(ESPN);
               const stand = parseEspnStandings(htmlStand);
 
-              // scorers: usa manuale se presente
               let capo;
               if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
                 const goalsM = Number(current.goals_manual);
@@ -133,7 +132,6 @@ jobs:
               }
 
               const payload = {
-                // preserva campi extra (es. lock, capo_manual…)
                 ...current,
                 teams: stand.teams.slice(0,20),
                 pos_real: stand.pos_real.slice(0,20),
