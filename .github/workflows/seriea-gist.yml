@@ -3,14 +3,14 @@ name: Update Gist (Serie A)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # ogni 30 min
+    - cron: "*/30 * * * *"     # ogni 30 minuti
   workflow_dispatch: {}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Run inline Node (fix scorers parser)
+      - name: Run inline Node (fix scorers + manual override)
         shell: bash
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -22,7 +22,6 @@ jobs:
           const SKY  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
           const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
           const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
-
           if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
 
           async function fetchText(url){
@@ -30,37 +29,51 @@ jobs:
             if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
             return r.text();
           }
+          async function gh(url, opt={}) {
+            const r = await fetch(url, {
+              ...opt,
+              headers: {
+                "authorization": `token ${GIST_TOKEN}`,
+                "accept": "application/vnd.github+json",
+                "user-agent": "seriea-gist-action",
+                ...(opt.headers||{})
+              }
+            });
+            if (!r.ok) throw new Error(`${opt.method||"GET"} ${url} -> ${r.status}`);
+            return r;
+          }
+          async function readCurrent(){
+            const j = await (await gh(`https://api.github.com/gists/${GIST_ID}`)).json();
+            const f = j.files[GIST_FILE || "Classifica.json"];
+            if (!f || !f.content) return {};
+            try { return JSON.parse(f.content); } catch { return {}; }
+          }
+          async function writeGist(payload){
+            const body = { files: { [GIST_FILE || "Classifica.json"]: { content: JSON.stringify(payload, null, 2) } } };
+            await gh(`https://api.github.com/gists/${GIST_ID}`, {
+              method: "PATCH",
+              headers: { "content-type":"application/json" },
+              body: JSON.stringify(body)
+            });
+          }
 
-          // -------- mapping nomi squadra (come prima) --------
+          // ---------- mapping nomi squadra ----------
           const rmAccents = s => s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
           const canon = s => rmAccents(String(s||"").toLowerCase())
             .replace(/\b(ac|as|ss|ssc|us|fc|bc|cfc)\b/g, " ")
             .replace(/\b(calcio|football|club)\b/g, " ")
-            .replace(/[^a-z0-9\s]/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
+            .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
           const TEAM_MAP = new Map(Object.entries({
             "inter milan":"Inter","internazionale":"Inter","inter":"Inter",
-            "ac milan":"Milan","milan":"Milan",
-            "ssc napoli":"Napoli","napoli":"Napoli",
-            "juventus":"Juventus",
-            "as roma":"Roma","roma":"Roma",
-            "ss lazio":"Lazio","lazio":"Lazio",
-            "atalanta bergamo":"Atalanta","atalanta":"Atalanta",
-            "bologna fc":"Bologna","bologna":"Bologna",
-            "fiorentina":"Fiorentina",
-            "torino":"Torino",
-            "udinese calcio":"Udinese","udinese":"Udinese",
-            "lecce":"Lecce",
-            "sassuolo":"Sassuolo",
-            "cagliari":"Cagliari",
-            "hellas verona":"Verona","verona":"Verona",
-            "genoa cfc":"Genoa","genoa":"Genoa",
+            "ac milan":"Milan","milan":"Milan","ssc napoli":"Napoli","napoli":"Napoli","juventus":"Juventus",
+            "as roma":"Roma","roma":"Roma","ss lazio":"Lazio","lazio":"Lazio","atalanta bergamo":"Atalanta","atalanta":"Atalanta",
+            "bologna fc":"Bologna","bologna":"Bologna","fiorentina":"Fiorentina","torino":"Torino",
+            "udinese calcio":"Udinese","udinese":"Udinese","lecce":"Lecce","sassuolo":"Sassuolo","cagliari":"Cagliari",
+            "hellas verona":"Verona","verona":"Verona","genoa cfc":"Genoa","genoa":"Genoa",
             "monza":"Monza","empoli":"Empoli","salernitana":"Salernitana","frosinone":"Frosinone",
-            "spezia":"Spezia","venezia":"Venezia",
-            "pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
+            "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
           }));
-          const mapTeam = name => TEAM_MAP.get(canon(name)) || name.trim();
+          const mapTeam = n => TEAM_MAP.get(canon(n)) || n.trim();
 
           function parseEspnStandings(html){
             const teams = [];
@@ -74,7 +87,7 @@ jobs:
             return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
           }
 
-          // -------- NUOVO parser Sky (robusto, con filtri) --------
+          // ---------- Sky scorers: parser robusto + filtri ----------
           const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
           const strip = s => s.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const plausible = name => {
@@ -82,62 +95,46 @@ jobs:
             if (!n || BAD.test(n)) return false;
             if (n.length < 3 || n.length > 40) return false;
             if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(n)) return false;
-            const parts = n.split(/\s+/);
-            return parts.length <= 4; // esclude frasi lunghe (menu)
+            return n.split(/\s+/).length <= 4;
           };
-
           function parseSkyScorers(html){
-            // 1) Prova: riga con posizione = 1
-            const row1 = html.match(
-              /<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i
-            );
+            // 1) Riga con posizione = 1
+            const row1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
             if (row1) {
-              const name = strip(row1[1]);
-              const goals = Number(row1[2]);
-              if (plausible(name)) return { capo_actual: [name], goals, _source: "sky_v2" };
+              const name = strip(row1[1]); const goals = Number(row1[2]);
+              if (plausible(name)) return { capo_actual:[name], goals, _source:"sky_v3" };
             }
-
-            // 2) Fallback: scorri tutte le righe, prendi la più alta valida
-            let best = null;
-            const re = /<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
-            let m;
-            while ((m = re.exec(html))) {
-              const name = strip(m[1]);
-              const goals = Number(m[2]);
-              if (!Number.isFinite(goals)) continue;
-              if (!plausible(name)) continue;
-              if (!best || goals > best.goals) best = { name, goals };
+            // 2) Fallback: scegli la riga valida con più gol
+            let best=null; const re=/<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
+            let m; while((m=re.exec(html))){
+              const name=strip(m[1]); const goals=Number(m[2]);
+              if (!Number.isFinite(goals) || !plausible(name)) continue;
+              if (!best || goals>best.goals) best={name,goals};
             }
-            if (best) return { capo_actual: [best.name], goals: best.goals, _source: "sky_v2" };
-
-            // 3) Ultimo fallback: NON restituire testo spazzatura
-            return { capo_actual: [], goals: null, _source: "sky_fail" };
-          }
-
-          async function updateGist(payload){
-            const url = `https://api.github.com/gists/${GIST_ID}`;
-            const body = { files: { [GIST_FILE || "Classifica.json"]: { content: JSON.stringify(payload, null, 2) } } };
-            const r = await fetch(url, {
-              method: "PATCH",
-              headers: {
-                "authorization": `token ${GIST_TOKEN}`,
-                "accept": "application/vnd.github+json",
-                "content-type": "application/json",
-                "user-agent": "seriea-gist-action"
-              },
-              body: JSON.stringify(body)
-            });
-            if (!r.ok) throw new Error(`Gist PATCH ${r.status}: ${await r.text()}`);
-            return r.json();
+            if (best) return { capo_actual:[best.name], goals:best.goals, _source:"sky_v3" };
+            return { capo_actual:[], goals:null, _source:"sky_fail" };
           }
 
           (async () => {
             try {
-              const [htmlStand, htmlSky] = await Promise.all([fetchText(ESPN), fetchText(SKY)]);
+              const current = await readCurrent();   // per override manuale
+              // standings
+              const htmlStand = await fetchText(ESPN);
               const stand = parseEspnStandings(htmlStand);
-              const capo  = parseSkyScorers(htmlSky);
+
+              // scorers: usa manuale se presente
+              let capo;
+              if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
+                const goalsM = Number(current.goals_manual);
+                capo = { capo_actual: current.capo_manual, goals: Number.isFinite(goalsM) ? goalsM : null, _source: "manual" };
+              } else {
+                const htmlSky = await fetchText(SKY);
+                capo = parseSkyScorers(htmlSky);
+              }
 
               const payload = {
+                // preserva campi extra (es. lock, capo_manual…)
+                ...current,
                 teams: stand.teams.slice(0,20),
                 pos_real: stand.pos_real.slice(0,20),
                 capo_actual: capo.capo_actual || [],
@@ -146,8 +143,8 @@ jobs:
                 _sources: { standings: stand._source, scorers: capo._source }
               };
 
-              const out = await updateGist(payload);
-              console.log("Gist updated:", out.id, out.updated_at, payload._sources);
+              await writeGist(payload);
+              console.log("Gist updated OK.", payload._sources);
             } catch (e) {
               console.error("Sync failed:", e?.message || e);
               process.exit(1);
