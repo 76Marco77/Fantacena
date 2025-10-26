@@ -1,5 +1,4 @@
 
-# .github/workflows/seriea-gist.yml
 name: Update Gist (Serie A)
 
 on:
@@ -88,12 +87,11 @@ jobs:
           }));
           const mapTeam = n => TEAM_MAP.get(canon(n)) || String(n||"").trim();
 
-          // ---------- ESPN: standings (HTML) ----------
+          // ---------- standings ----------
           function parseEspnStandings(html){
             const teams = [];
             const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
-            let m;
-            while ((m = re.exec(html)) && teams.length < 20) {
+            let m; while ((m = re.exec(html)) && teams.length < 20) {
               const name = m[1].replace(/\s+/g," ").trim();
               if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(mapTeam(name));
             }
@@ -101,7 +99,7 @@ jobs:
             return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
           }
 
-          // ---------- Sky: capocannoniere ----------
+          // ---------- marcatori ----------
           const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
           const strip = s => s.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const plausible = name => {
@@ -127,17 +125,16 @@ jobs:
             return { capo_actual:[], goals:null, _source:"sky_fail" };
           }
 
-          // ---------- ESPN: scoreboard robusto ----------
+          // ---------- scoreboard Ven→Mar ----------
           const toUTCmid = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
           const yyyymmdd = d => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`;
-          function* daysFriToMon(base=new Date()){
+          function* daysFriToTue(base=new Date()){
             let a = toUTCmid(base), b = toUTCmid(base);
             while (a.getUTCDay() !== 5) a.setUTCDate(a.getUTCDate()-1); // Fri
-            while (b.getUTCDay() !== 1) b.setUTCDate(b.getUTCDate()+1); // Mon
+            while (b.getUTCDay() !== 2) b.setUTCDate(b.getUTCDate()+1); // Tue
             for (let d = new Date(a); d <= b; d.setUTCDate(d.getUTCDate()+1)) yield new Date(d);
           }
           async function fetchOneDay(dayISO){
-            // Prova prima ?calendardate=, poi ?dates=, su 2 endpoint diversi
             const urls = [];
             for (const api of ESPN_SB_APIS){
               urls.push(`${api}?calendardate=${dayISO}`);
@@ -148,14 +145,13 @@ jobs:
                 const j = await fetchJSON(url);
                 const events = Array.isArray(j?.events) ? j.events : [];
                 if (events.length) return events;
-              }catch(e){ /* prova url successivo */ }
+              }catch(e){ /* try next */ }
             }
             return [];
           }
           async function fetchResults(){
-            const rows = [];
-            const seen = new Set();
-            for (const d of daysFriToMon(new Date())){
+            const rows = []; const seen = new Set();
+            for (const d of daysFriToTue(new Date())){
               const iso = yyyymmdd(d);
               const events = await fetchOneDay(iso);
               for (const ev of events){
@@ -168,7 +164,7 @@ jobs:
                 const aName = mapTeam(away.team?.shortDisplayName || away.team?.name || away.team?.displayName || away.team?.abbreviation || "");
                 const sh = Number(home.score ?? NaN);
                 const sa = Number(away.score ?? NaN);
-                const st = comp.status?.type?.state || ev.status?.type?.state || "pre"; // pre | in | post
+                const st = (comp.status?.type?.state || ev.status?.type?.state || "pre").toLowerCase(); // pre | in | post
                 const start = comp.date || ev.date || null;
                 const key = `${hName}|${aName}|${start}`;
                 if (seen.has(key)) continue; seen.add(key);
@@ -176,10 +172,8 @@ jobs:
               }
             }
             rows.sort((x,y)=> String(x.start||"").localeCompare(String(y.start||"")));
-            const results_str = rows
-              .filter(r => r.status !== "pre")
-              .map(r => `${r.home} ${Number.isFinite(r.sh)?r.sh:"–"}–${Number.isFinite(r.sa)?r.sa:"–"} ${r.away}`);
-            console.log(`[scoreboard] days=${Array.from(daysFriToMon()).length} events=${rows.length}`);
+            const results_str = rows.filter(r => r.status !== "pre").map(r => `${r.home} ${Number.isFinite(r.sh)?r.sh:"–"}–${Number.isFinite(r.sa)?r.sa:"–"} ${r.away}`);
+            console.log(`[scoreboard] total=${rows.length}`);
             return { results_raw: rows, results_str, _source: rows.length ? "espn_scoreboard" : "scoreboard_empty" };
           }
 
@@ -189,18 +183,14 @@ jobs:
               const htmlStand = await fetchText(ESPN_STAND);
               const stand = parseEspnStandings(htmlStand);
 
-              // Capocannoniere (manual override compat)
+              // Capocannoniere
               let capo;
               if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
                 const goalsM = Number(current.goals_manual);
                 capo = { capo_actual: current.capo_manual, goals: Number.isFinite(goalsM) ? goalsM : null, _source: "manual" };
               } else {
-                try {
-                  const htmlSky = await fetchText(SKY_SCORERS);
-                  capo = parseSkyScorers(htmlSky);
-                } catch {
-                  capo = { capo_actual: current.capo_actual || [], goals: current.goals ?? null, _source: "sky_fail" };
-                }
+                try { const htmlSky = await fetchText(SKY_SCORERS); capo = parseSkyScorers(htmlSky); }
+                catch { capo = { capo_actual: current.capo_actual || [], goals: current.goals ?? null, _source: "sky_fail" }; }
               }
 
               const res = await fetchResults();
