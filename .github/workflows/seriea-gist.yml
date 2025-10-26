@@ -1,4 +1,5 @@
 
+# .github/workflows/seriea-gist.yml
 name: Update Gist (Serie A)
 
 on:
@@ -13,7 +14,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Run inline Node (fix scorers + manual override)
+      - name: Run inline Node (standings + scorers + results)
         shell: bash
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -21,9 +22,13 @@ jobs:
           GIST_FILE:  Classifica.json
         run: |
           node - <<'NODE'
-          const ESPN = "https://www.espn.com/soccer/standings/_/league/ita.1";
-          const SKY  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
-          const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
+          const ESPN_STAND   = "https://www.espn.com/soccer/standings/_/league/ita.1";
+          const ESPN_SB_APIS = [
+            "https://site.api.espn.com/apis/v2/sports/soccer/ita.1/scoreboard",
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard",
+          ];
+          const SKY_SCORERS  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
+          const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
           const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
           if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
 
@@ -31,6 +36,11 @@ jobs:
             const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
             if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
             return r.text();
+          }
+          async function fetchJSON(url){
+            const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
+            if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+            return r.json();
           }
           async function gh(url, opt={}) {
             const r = await fetch(url, {
@@ -60,7 +70,7 @@ jobs:
             });
           }
 
-          // ---------- mapping nomi squadra ----------
+          // ---------- mapping squadre ----------
           const rmAccents = s => s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
           const canon = s => rmAccents(String(s||"").toLowerCase())
             .replace(/\b(ac|as|ss|ssc|us|fc|bc|cfc)\b/g, " ")
@@ -76,8 +86,9 @@ jobs:
             "monza":"Monza","empoli":"Empoli","salernitana":"Salernitana","frosinone":"Frosinone",
             "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
           }));
-          const mapTeam = n => TEAM_MAP.get(canon(n)) || n.trim();
+          const mapTeam = n => TEAM_MAP.get(canon(n)) || String(n||"").trim();
 
+          // ---------- ESPN: standings (HTML) ----------
           function parseEspnStandings(html){
             const teams = [];
             const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
@@ -90,7 +101,7 @@ jobs:
             return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
           }
 
-          // ---------- Sky scorers: parser robusto + override manuale ----------
+          // ---------- Sky: capocannoniere ----------
           const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
           const strip = s => s.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const plausible = name => {
@@ -116,20 +127,83 @@ jobs:
             return { capo_actual:[], goals:null, _source:"sky_fail" };
           }
 
+          // ---------- ESPN: scoreboard robusto ----------
+          const toUTCmid = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+          const yyyymmdd = d => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`;
+          function* daysFriToMon(base=new Date()){
+            let a = toUTCmid(base), b = toUTCmid(base);
+            while (a.getUTCDay() !== 5) a.setUTCDate(a.getUTCDate()-1); // Fri
+            while (b.getUTCDay() !== 1) b.setUTCDate(b.getUTCDate()+1); // Mon
+            for (let d = new Date(a); d <= b; d.setUTCDate(d.getUTCDate()+1)) yield new Date(d);
+          }
+          async function fetchOneDay(dayISO){
+            // Prova prima ?calendardate=, poi ?dates=, su 2 endpoint diversi
+            const urls = [];
+            for (const api of ESPN_SB_APIS){
+              urls.push(`${api}?calendardate=${dayISO}`);
+              urls.push(`${api}?dates=${dayISO}`);
+            }
+            for (const url of urls){
+              try{
+                const j = await fetchJSON(url);
+                const events = Array.isArray(j?.events) ? j.events : [];
+                if (events.length) return events;
+              }catch(e){ /* prova url successivo */ }
+            }
+            return [];
+          }
+          async function fetchResults(){
+            const rows = [];
+            const seen = new Set();
+            for (const d of daysFriToMon(new Date())){
+              const iso = yyyymmdd(d);
+              const events = await fetchOneDay(iso);
+              for (const ev of events){
+                const comp = (ev.competitions||[])[0]; if (!comp) continue;
+                const cs = comp.competitors||[];
+                const home = cs.find(c=>c.homeAway==="home");
+                const away = cs.find(c=>c.homeAway==="away");
+                if (!home || !away) continue;
+                const hName = mapTeam(home.team?.shortDisplayName || home.team?.name || home.team?.displayName || home.team?.abbreviation || "");
+                const aName = mapTeam(away.team?.shortDisplayName || away.team?.name || away.team?.displayName || away.team?.abbreviation || "");
+                const sh = Number(home.score ?? NaN);
+                const sa = Number(away.score ?? NaN);
+                const st = comp.status?.type?.state || ev.status?.type?.state || "pre"; // pre | in | post
+                const start = comp.date || ev.date || null;
+                const key = `${hName}|${aName}|${start}`;
+                if (seen.has(key)) continue; seen.add(key);
+                rows.push({ home:hName, away:aName, sh:Number.isFinite(sh)?sh:null, sa:Number.isFinite(sa)?sa:null, status:st, start });
+              }
+            }
+            rows.sort((x,y)=> String(x.start||"").localeCompare(String(y.start||"")));
+            const results_str = rows
+              .filter(r => r.status !== "pre")
+              .map(r => `${r.home} ${Number.isFinite(r.sh)?r.sh:"–"}–${Number.isFinite(r.sa)?r.sa:"–"} ${r.away}`);
+            console.log(`[scoreboard] days=${Array.from(daysFriToMon()).length} events=${rows.length}`);
+            return { results_raw: rows, results_str, _source: rows.length ? "espn_scoreboard" : "scoreboard_empty" };
+          }
+
           (async () => {
             try {
-              const current = await readCurrent();   // per override manuale
-              const htmlStand = await fetchText(ESPN);
+              const current = await readCurrent();
+              const htmlStand = await fetchText(ESPN_STAND);
               const stand = parseEspnStandings(htmlStand);
 
+              // Capocannoniere (manual override compat)
               let capo;
               if (Array.isArray(current.capo_manual) && current.capo_manual.length) {
                 const goalsM = Number(current.goals_manual);
                 capo = { capo_actual: current.capo_manual, goals: Number.isFinite(goalsM) ? goalsM : null, _source: "manual" };
               } else {
-                const htmlSky = await fetchText(SKY);
-                capo = parseSkyScorers(htmlSky);
+                try {
+                  const htmlSky = await fetchText(SKY_SCORERS);
+                  capo = parseSkyScorers(htmlSky);
+                } catch {
+                  capo = { capo_actual: current.capo_actual || [], goals: current.goals ?? null, _source: "sky_fail" };
+                }
               }
+
+              const res = await fetchResults();
 
               const payload = {
                 ...current,
@@ -137,12 +211,14 @@ jobs:
                 pos_real: stand.pos_real.slice(0,20),
                 capo_actual: capo.capo_actual || [],
                 goals: capo.goals ?? null,
+                results_raw: res.results_raw,
+                results_str: res.results_str,
                 synced_at: new Date().toISOString(),
-                _sources: { standings: stand._source, scorers: capo._source }
+                _sources: { standings: stand._source, scorers: capo._source, results: res._source }
               };
 
               await writeGist(payload);
-              console.log("Gist updated OK.", payload._sources);
+              console.log("Gist updated OK.", payload._sources, `(${payload.results_str?.length||0} results)`);
             } catch (e) {
               console.error("Sync failed:", e?.message || e);
               process.exit(1);
