@@ -1,13 +1,4 @@
-https://fantacena.netlify.app
 
-
-https://github.com/76Marco77/Fantacena/actions/workflows/seriea-gist.yml
-
-Su safari per RUN (forzare vero aggiornamento)
-https://github.com/76Marco77/Fantacena/actions/workflows/seriea-gist.yml
-
-
-# .github/workflows/seriea-gist.yml
 name: Update Gist (Serie A)
 
 on:
