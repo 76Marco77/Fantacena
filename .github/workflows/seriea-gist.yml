@@ -1,5 +1,6 @@
 
 
+
 name: Update Gist (Serie A)
 
 on:
@@ -14,7 +15,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Run inline Node (standings + scorers multi-source + results)
+      - name: Run inline Node (standings + results + scorers with MANUAL override)
         shell: bash
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -24,7 +25,7 @@ jobs:
           node - <<'NODE'
           const ESPN_STAND   = "https://www.espn.com/soccer/standings/_/league/ita.1";
           const SKY_SCORERS  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
-          const ESPN_STATS   = "https://www.espn.com/soccer/stats/_/league/ita.1"; // tabella "Goals"
+          const ESPN_STATS   = "https://www.espn.com/soccer/stats/_/league/ita.1";
           const ESPN_SB_APIS = [
             "https://site.api.espn.com/apis/v2/sports/soccer/ita.1/scoreboard",
             "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard",
@@ -33,15 +34,10 @@ jobs:
           const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
           if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
 
-          async function fetchText(url){
-            const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
-            if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
-            return r.text();
-          }
-          async function fetchJSON(url){
-            const r = await fetch(url, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" } });
-            if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
-            return r.json();
+          async function http(u, type="text"){
+            const r = await fetch(u, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" }, cache:"no-store" });
+            if (!r.ok) throw new Error(`${r.status} ${u}`);
+            return type==="json" ? r.json() : r.text();
           }
           async function gh(url, opt={}) {
             const r = await fetch(url, {
@@ -75,199 +71,138 @@ jobs:
           const rmAccents = s => s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
           const canon = s => rmAccents(String(s||"").toLowerCase())
             .replace(/[^a-z0-9\s.'-]/g," ").replace(/\s+/g," ").trim();
-          const stripTags = s => String(s||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+          const strip = s => String(s||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+          const has = v => v !== null && v !== undefined && !(typeof v === "string" && v.trim()==="");
 
-          // ---------- mapping squadre ----------
-          const TEAM_MAP = new Map(Object.entries({
-            "inter milan":"Inter","internazionale":"Inter","inter":"Inter",
-            "ac milan":"Milan","milan":"Milan","ssc napoli":"Napoli","napoli":"Napoli","juventus":"Juventus",
-            "as roma":"Roma","roma":"Roma","ss lazio":"Lazio","lazio":"Lazio","atalanta bergamo":"Atalanta","atalanta":"Atalanta",
-            "bologna fc":"Bologna","bologna":"Bologna","fiorentina":"Fiorentina","torino":"Torino",
-            "udinese calcio":"Udinese","udinese":"Udinese","lecce":"Lecce","sassuolo":"Sassuolo","cagliari":"Cagliari",
-            "hellas verona":"Verona","verona":"Verona","genoa cfc":"Genoa","genoa":"Genoa",
-            "monza":"Monza","empoli":"Empoli","salernitana":"Salernitana","frosinone":"Frosinone",
-            "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
-          }));
-          const mapTeam = n => TEAM_MAP.get(canon(n)) || String(n||"").trim();
-
-          // ---------- standings (ESPN HTML) ----------
+          // ---------- standings ----------
           function parseEspnStandings(html){
             const teams = [];
             const re = /<a[^>]*class="AnchorLink"[^>]*>([^<]+)<\/a>/gi;
             let m;
             while ((m = re.exec(html)) && teams.length < 20) {
               const name = m[1].replace(/\s+/g," ").trim();
-              if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(mapTeam(name));
+              if (name && !/Standings|Team|Division|League/i.test(name)) teams.push(name);
             }
-            if (teams.length < 10) throw new Error("ESPN parsing failed");
+            if (teams.length < 10) throw new Error("ESPN standings parsing failed");
             return { teams, pos_real: teams.map((_,i)=>i+1), _source: "espn" };
           }
 
-          // ---------- scorers: SKY ----------
-          const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|serie a|risultati|calendario|classifica|news)\b/i;
-          const plausible = name => {
-            const n = stripTags(name);
-            if (!n || BAD.test(n)) return false;
-            if (n.length < 3 || n.length > 40) return false;
-            if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(n)) return false;
-            return n.split(/\s+/).length <= 4;
+          // ---------- scorers sources ----------
+          const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|risultati|calendario|classifica|news)\b/i;
+          const plausible = n => {
+            const s = strip(n);
+            if (!s || BAD.test(s)) return false;
+            if (s.length < 3 || s.length > 40) return false;
+            if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(s)) return false;
+            return s.split(/\s+/).length <= 4;
           };
-          function parseSkyScorers(html){
-            // riga #1 (più stabile)
-            const row1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
-            if (row1) {
-              const name = stripTags(row1[1]); const goals = Number(row1[2]);
-              if (plausible(name)) return [{ name, goals, src:"sky" }];
-            }
-            // fallback: scorri tutte le righe
-            const out=[]; const re=/<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
-            let m; while((m=re.exec(html))){
-              const name=stripTags(m[1]); const goals=Number(m[2]);
-              if (Number.isFinite(goals) && plausible(name)) out.push({name,goals,src:"sky"});
-            }
+          function parseSky(html){
+            const out=[]; 
+            const r1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
+            if (r1) { const name=strip(r1[1]), g=Number(r1[2]); if(plausible(name)) out.push({name,goals:g,src:"sky"}); }
+            const re = /<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
+            let m; while((m=re.exec(html))){ const name=strip(m[1]), g=Number(m[2]); if (Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"sky"}); }
             return out;
           }
-
-          // ---------- scorers: ESPN Stats ----------
           function parseEspnStats(html){
-            // cerca la tabella "Goals"
-            // prendi la prima riga: posizione 1, nome anchor, goals
             const out=[];
-            const table = html.split(/Goals/i)[1] || html; // grossolano, poi regex
-            const reRow = /<tr[^>]*>\s*<td[^>]*>\s*(\d+)\s*<\/td>[\s\S]*?<a[^>]*>([^<]+)<\/a>[\s\S]*?<td[^>]*>\s*(\d{1,2})\s*<\/td>/gim;
-            let m;
-            while ((m = reRow.exec(table))) {
-              const pos = Number(m[1]), name = stripTags(m[2]), goals = Number(m[3]);
-              if (!Number.isFinite(pos) || !Number.isFinite(goals)) continue;
-              if (!plausible(name)) continue;
-              out.push({ name, goals, src:"espn_stats" });
-            }
+            const re1 = /<tr[^>]*>\s*<td[^>]*>\s*(\d+)\s*<\/td>[\s\S]*?<a[^>]*>([^<]+)<\/a>[\s\S]*?<td[^>]*>\s*(\d{1,2})\s*<\/td>/gim;
+            let m1; while((m1=re1.exec(html))){ const pos=+m1[1],name=strip(m1[2]),g=+m1[3]; if(pos>=1&&Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"espn_stats"}); }
+            const re2 = /data-idx="(\d+)"[\s\S]*?>([^<]+)<\/a>[\s\S]*?data-sort="(\d{1,2})"/gim;
+            let m2; while((m2=re2.exec(html))){ const pos=+m2[1],name=strip(m2[2]),g=+m2[3]; if(pos>=1&&Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"espn_stats"}); }
             return out;
           }
-
-          // ---------- consensus scorers ----------
-          async function getScorersConsensus(current){
-            // manual override
-            const manual = Array.isArray(current.capo_manual) && current.capo_manual.length;
-            const gMan   = Number(current.goals_manual);
-            if (manual) {
-              return { capo_actual: current.capo_manual, goals: Number.isFinite(gMan) ? gMan : null,
-                       _source: "manual", detail: [{src:"manual",count: current.capo_manual.length}] };
+          async function getScorers(current){
+            // 0) Override manuale (priorità)
+            const manualNames = Array.isArray(current.capo_manual)? current.capo_manual.filter(Boolean) : [];
+            const manualGoals = Number(current.goals_manual);
+            if (manualNames.length || Number.isFinite(manualGoals)){
+              return { capo_actual: manualNames.length? manualNames : (current.capo_actual||[]),
+                       goals: Number.isFinite(manualGoals)? manualGoals : (Number.isFinite(+current.goals)? +current.goals : null),
+                       _source: "manual",
+                       detail:[{src:"manual",names:manualNames,goals:manualGoals}] };
             }
-
-            const detail = [];
-            const bag = new Map(); // key=canon(name) -> {name, goalsMax}
-            function add(name, goals, src){
-              const k = canon(name);
-              if (!k) return;
-              const prev = bag.get(k);
-              if (!prev || goals > prev.goals) bag.set(k, { name: stripTags(name), goals });
-              detail.push({ src, name: stripTags(name), goals });
-            }
-
-            // SKY
-            try {
-              const h = await fetchText(SKY_SCORERS);
-              for (const r of parseSkyScorers(h)) add(r.name, r.goals, r.src);
-            } catch(_) {}
-
-            // ESPN Stats
-            try {
-              const h = await fetchText(ESPN_STATS);
-              for (const r of parseEspnStats(h)) add(r.name, r.goals, r.src);
-            } catch(_) {}
-
-            // consensus
+            // 1) Multi-fonte
+            const bag = new Map(); const detail=[];
+            const add = (n,g,src)=>{ const k=canon(n); if(!k) return; const prev=bag.get(k); if(!prev||g>prev.goals) bag.set(k,{name:strip(n),goals:g}); detail.push({src,name:strip(n),goals:g}); };
+            try{ const h=await http(SKY_SCORERS); for (const r of parseSky(h)) add(r.name,r.goals,r.src); }catch{}
+            try{ const h=await http(ESPN_STATS);  for (const r of parseEspnStats(h)) add(r.name,r.goals,r.src); }catch{}
             const vals = Array.from(bag.values());
-            if (!vals.length) return { capo_actual: current.capo_actual || [], goals: current.goals ?? null, _source: "scorers_fail", detail };
-
-            const maxGoals = Math.max(...vals.map(v=>v.goals));
-            const top = vals.filter(v => v.goals === maxGoals).map(v => v.name);
-            return { capo_actual: top, goals: maxGoals, _source: "consensus", detail };
+            if (!vals.length){
+              // 2) Fail → NON sovrascrivere: mantieni ciò che c'è
+              const keepG = Number(current.goals);
+              return { capo_actual: Array.isArray(current.capo_actual)? current.capo_actual : [],
+                       goals: Number.isFinite(keepG)? keepG : null,
+                       _source: "scorers_fail_keep", detail };
+            }
+            const max = Math.max(...vals.map(v=>v.goals));
+            const top = vals.filter(v=>v.goals===max).map(v=>v.name);
+            return { capo_actual: top, goals: max, _source: "consensus", detail };
           }
 
-          // ---------- scoreboard Ven→Lun ----------
+          // ---------- results (Ven→Lun), identico a prima ----------
           const toUTCmid = d => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
           const yyyymmdd = d => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,"0")}${String(d.getUTCDate()).padStart(2,"0")}`;
           function* daysFriToMon(base=new Date()){
-            let a = toUTCmid(base), b = toUTCmid(base);
-            while (a.getUTCDay() !== 5) a.setUTCDate(a.getUTCDate()-1); // Fri
-            while (b.getUTCDay() !== 1) b.setUTCDate(b.getUTCDate()+1); // Mon
-            for (let d = new Date(a); d <= b; d.setUTCDate(d.getUTCDate()+1)) yield new Date(d);
+            let a=toUTCmid(base), b=toUTCmid(base);
+            while(a.getUTCDay()!==5) a.setUTCDate(a.getUTCDate()-1);
+            while(b.getUTCDay()!==1) b.setUTCDate(b.getUTCDate()+1);
+            for(let d=new Date(a); d<=b; d.setUTCDate(d.getUTCDate()+1)) yield new Date(d);
           }
           async function fetchOneDay(dayISO){
-            const urls = [];
-            for (const api of ESPN_SB_APIS){
-              urls.push(`${api}?calendardate=${dayISO}`);
-              urls.push(`${api}?dates=${dayISO}`);
-            }
-            for (const url of urls){
-              try{
-                const j = await fetchJSON(url);
-                const events = Array.isArray(j?.events) ? j.events : [];
-                if (events.length) return events;
-              }catch(e){ /* next */ }
-            }
+            const urls=[]; for (const api of ESPN_SB_APIS){ urls.push(`${api}?calendardate=${dayISO}`); urls.push(`${api}?dates=${dayISO}`); }
+            for (const u of urls){ try{ const j=await http(u,"json"); const ev=Array.isArray(j?.events)?j.events:[]; if(ev.length) return ev; }catch{} }
             return [];
           }
           async function fetchResults(){
-            const rows = [];
-            const seen = new Set();
+            const rows=[]; const seen=new Set();
             for (const d of daysFriToMon(new Date())){
-              const iso = yyyymmdd(d);
-              const events = await fetchOneDay(iso);
+              const iso=yyyymmdd(d);
+              const events=await fetchOneDay(iso);
               for (const ev of events){
-                const comp = (ev.competitions||[])[0]; if (!comp) continue;
-                const cs = comp.competitors||[];
-                const home = cs.find(c=>c.homeAway==="home");
-                const away = cs.find(c=>c.homeAway==="away");
-                if (!home || !away) continue;
-                const hName = mapTeam(home.team?.shortDisplayName || home.team?.name || home.team?.displayName || home.team?.abbreviation || "");
-                const aName = mapTeam(away.team?.shortDisplayName || away.team?.name || away.team?.displayName || away.team?.abbreviation || "");
-                const sh = Number(home.score ?? NaN);
-                const sa = Number(away.score ?? NaN);
-                const st = (comp.status?.type?.state || ev.status?.type?.state || "pre").toLowerCase(); // pre | in | post
+                const comp=(ev.competitions||[])[0]; if(!comp) continue;
+                const cs=comp.competitors||[]; const home=cs.find(c=>c.homeAway==="home"); const away=cs.find(c=>c.homeAway==="away");
+                if(!home||!away) continue;
+                const hName = home.team?.shortDisplayName || home.team?.name || home.team?.displayName || home.team?.abbreviation || "";
+                const aName = away.team?.shortDisplayName || away.team?.name || away.team?.displayName || away.team?.abbreviation || "";
+                const sh = Number(home.score ?? NaN); const sa = Number(away.score ?? NaN);
+                const st = (comp.status?.type?.state || ev.status?.type?.state || "pre").toLowerCase();
                 const start = comp.date || ev.date || null;
-                const key = `${hName}|${aName}|${start}`;
-                if (seen.has(key)) continue; seen.add(key);
-                rows.push({ home:hName, away:aName, sh:Number.isFinite(sh)?sh:null, sa:Number.isFinite(sa)?sa:null, status:st, start });
+                const key = `${hName}|${aName}|${start}`; if(seen.has(key)) continue; seen.add(key);
+                rows.push({home:hName,away:aName,sh:Number.isFinite(sh)?sh:null,sa:Number.isFinite(sa)?sa:null,status:st,start});
               }
             }
             rows.sort((x,y)=> String(x.start||"").localeCompare(String(y.start||"")));
-            const results_str = rows
-              .filter(r => r.status !== "pre")
-              .map(r => `${r.home} ${Number.isFinite(r.sh)?r.sh:"–"}–${Number.isFinite(r.sa)?r.sa:"–"} ${r.away}`);
-            return { results_raw: rows, results_str, _source: rows.length ? "espn_scoreboard" : "scoreboard_empty" };
+            const results_str = rows.filter(r=>r.status!=="pre").map(r=>`${r.home} ${Number.isFinite(r.sh)?r.sh:"–"}–${Number.isFinite(r.sa)?r.sa:"–"} ${r.away}`);
+            return { results_raw: rows, results_str, _source: rows.length? "espn_scoreboard":"scoreboard_empty" };
           }
 
           (async () => {
             try {
               const current = await readCurrent();
-
-              // standings
-              const htmlStand = await fetchText(ESPN_STAND);
-              const stand = parseEspnStandings(htmlStand);
-
-              // scorers (multi-source with manual override)
-              const scorers = await getScorersConsensus(current);
-
-              // results
-              const res = await fetchResults();
+              const stand   = parseEspnStandings(await http(ESPN_STAND));
+              const scorers = await getScorers(current);               // 👈 manual-first, no overwrite on fail
+              const res     = await fetchResults();
 
               const payload = {
                 ...current,
                 teams: stand.teams.slice(0,20),
                 pos_real: stand.pos_real.slice(0,20),
-                capo_actual: scorers.capo_actual || [],
-                goals: Number.isFinite(Number(scorers.goals)) ? Number(scorers.goals) : null,
+                capo_actual: (scorers.capo_actual && scorers.capo_actual.length) ? scorers.capo_actual : (current.capo_actual || []),
+                goals: Number.isFinite(+scorers.goals) ? +scorers.goals : (Number.isFinite(+current.goals) ? +current.goals : null),
                 results_raw: res.results_raw,
                 results_str: res.results_str,
                 synced_at: new Date().toISOString(),
-                _sources: { standings: stand._source, scorers: scorers._source, results: res._source, scorers_detail: scorers.detail || [] }
+                _sources: {
+                  standings: stand._source,
+                  scorers:  scorers._source,
+                  results:  res._source,
+                  scorers_detail: scorers.detail || []
+                }
               };
 
               await writeGist(payload);
-              console.log("Gist updated OK.", payload._sources, `capo=${payload.capo_actual?.join(" | ")||"-"} (${payload.goals??"-"})`);
+              console.log("OK", payload._sources, `capo=${(payload.capo_actual||[]).join(" | ")||"-"} (${payload.goals??"-"})`);
             } catch (e) {
               console.error("Sync failed:", e?.message || e);
               process.exit(1);
