@@ -1,5 +1,4 @@
 
-
 # .github/workflows/seriea-gist.yml
 name: Update Gist (Serie A)
 
@@ -15,7 +14,22 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Run inline Node (standings + results + scorers + PG/Pti) con override manuale
+      - name: Setup Node 20 (stable fetch)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Sanity check secrets
+        shell: bash
+        env:
+          GIST_ID:    ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: |
+          test -n "$GIST_ID"    || { echo "❌ Missing GIST_ID secret"; exit 1; }
+          test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN secret"; exit 1; }
+          echo "✅ Secrets present"
+
+      - name: Run inline Node (standings + results + scorers + PG/Pti) con override manuale e retry
         shell: bash
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -36,14 +50,23 @@ jobs:
           ];
           const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36";
           const { GIST_ID, GIST_TOKEN, GIST_FILE } = process.env;
-          if (!GIST_ID || !GIST_TOKEN) { console.error("Missing GIST_ID/GIST_TOKEN"); process.exit(1); }
 
-          async function http(u, type="text"){
-            const r = await fetch(u, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" }, cache:"no-store" });
-            if (!r.ok) throw new Error(`${r.status} ${u}`);
-            return type==="json" ? r.json() : r.text();
+          const sleep = (ms) => new Promise(r=>setTimeout(r,ms));
+          async function http(u, type="text", tries=3){
+            let err;
+            for (let i=1;i<=tries;i++){
+              try{
+                const r = await fetch(u, { headers: { "user-agent": UA, "accept-language": "it-IT,it;q=0.9" }, cache:"no-store" });
+                if (!r.ok) throw new Error(`${r.status} ${u}`);
+                return type==="json" ? r.json() : r.text();
+              }catch(e){
+                err=e; console.error(`HTTP fail [${i}/${tries}] ->`, e.message);
+                if (i<tries) await sleep(1200*i);
+              }
+            }
+            throw err;
           }
-          async function gh(url, opt={}) {
+          async function gh(url, opt={}){
             const r = await fetch(url, {
               ...opt,
               headers: {
@@ -88,7 +111,8 @@ jobs:
             "spezia":"Spezia","venezia":"Venezia","pisa":"Pisa","cremonese":"Cremonese","parma":"Parma","como":"Como"
           }));
           const mapTeam = n => TEAM_MAP.get(canon(n)) || String(n||"").trim();
-          const keyTeam = n => (TEAM_MAP.get(canon(n)) || canon(n));
+          const keyTeam = n => TEAM_MAP.get(canon(n)) || canon(n);
+          const strip = s => String(s||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
 
           // ---------- standings (HTML) ----------
           function parseEspnStandings(html){
@@ -105,27 +129,26 @@ jobs:
 
           // ---------- scorers (Sky + ESPN Stats) con override manuale ----------
           const BAD = /\b(league|premier|tennis|formula|motogp|nba|f1|risultati|calendario|classifica|news)\b/i;
-          const strip = s => String(s||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const plausible = n => {
             const s = strip(n);
             if (!s || BAD.test(s)) return false;
             if (s.length < 3 || s.length > 40) return false;
-            if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\\-\\s]+$/.test(s)) return false;
-            return s.split(/\\s+/).length <= 4;
+            if (!/^[A-Za-zÀ-ÖØ-öø-ÿ.'\-\s]+$/.test(s)) return false;
+            return s.split(/\s+/).length <= 4;
           };
           function parseSky(html){
             const out=[]; 
-            const r1 = html.match(/<tr[^>]*>\\s*<td[^>]*>\\s*1\\s*<\\/td>\\s*<td[^>]*>(.*?)<\\/td>[\\s\\S]*?<td[^>]*>(\\d{1,2})<\\/td>/i);
+            const r1 = html.match(/<tr[^>]*>\s*<td[^>]*>\s*1\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/i);
             if (r1) { const name=strip(r1[1]), g=Number(r1[2]); if(plausible(name)) out.push({name,goals:g,src:"sky"}); }
-            const re = /<tr[^>]*>\\s*<td[^>]*>\\s*\\d+\\s*<\\/td>\\s*<td[^>]*>(.*?)<\\/td>[\\s\\S]*?<td[^>]*>(\\d{1,2})<\\/td>/gim;
+            const re = /<tr[^>]*>\s*<td[^>]*>\s*\d+\s*<\/td>\s*<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(\d{1,2})<\/td>/gim;
             let m; while((m=re.exec(html))){ const name=strip(m[1]), g=Number(m[2]); if (Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"sky"}); }
             return out;
           }
           function parseEspnStats(html){
             const out=[];
-            const re1 = /<tr[^>]*>\\s*<td[^>]*>\\s*(\\d+)\\s*<\\/td>[\\s\\S]*?<a[^>]*>([^<]+)<\\/a>[\\s\\S]*?<td[^>]*>\\s*(\\d{1,2})\\s*<\\/td>/gim;
+            const re1 = /<tr[^>]*>\s*<td[^>]*>\s*(\d+)\s*<\/td>[\s\S]*?<a[^>]*>([^<]+)<\/a>[\s\S]*?<td[^>]*>\s*(\d{1,2})\s*<\/td>/gim;
             let m1; while((m1=re1.exec(html))){ const pos=+m1[1],name=strip(m1[2]),g=+m1[3]; if(pos>=1&&Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"espn_stats"}); }
-            const re2 = /data-idx=\"(\\d+)\"[\\s\\S]*?>([^<]+)<\\/a>[\\s\\S]*?data-sort=\"(\\d{1,2})\"/gim;
+            const re2 = /data-idx="(\d+)"[\s\S]*?>([^<]+)<\/a>[\s\S]*?data-sort="(\d{1,2})"/gim;
             let m2; while((m2=re2.exec(html))){ const pos=+m2[1],name=strip(m2[2]),g=+m2[3]; if(pos>=1&&Number.isFinite(g)&&plausible(name)) out.push({name,goals:g,src:"espn_stats"}); }
             return out;
           }
@@ -133,6 +156,7 @@ jobs:
             const manualNames = Array.isArray(current.capo_manual)? current.capo_manual.filter(Boolean) : [];
             const manualGoals = Number(current.goals_manual);
             if (manualNames.length || Number.isFinite(manualGoals)){
+              console.log("Scorers: using MANUAL override");
               return { capo_actual: manualNames.length? manualNames : (current.capo_actual||[]),
                        goals: Number.isFinite(manualGoals)? manualGoals : (Number.isFinite(+current.goals)? +current.goals : null),
                        _source: "manual",
@@ -140,10 +164,11 @@ jobs:
             }
             const bag = new Map(); const detail=[];
             const add = (n,g,src)=>{ const k=canon(n); if(!k) return; const prev=bag.get(k); if(!prev||g>prev.goals) bag.set(k,{name:strip(n),goals:g}); detail.push({src,name:strip(n),goals:g}); };
-            try{ const h=await http(SKY_SCORERS); for (const r of parseSky(h)) add(r.name,r.goals,r.src); }catch{}
-            try{ const h=await http(ESPN_STATS);  for (const r of parseEspnStats(h)) add(r.name,r.goals,r.src); }catch{}
+            try{ const h=await http(SKY_SCORERS); for (const r of parseSky(h)) add(r.name,r.goals,r.src); }catch(e){ console.warn("Sky scorers fail:", e.message); }
+            try{ const h=await http(ESPN_STATS);  for (const r of parseEspnStats(h)) add(r.name,r.goals,r.src); }catch(e){ console.warn("ESPN stats fail:", e.message); }
             const vals = Array.from(bag.values());
             if (!vals.length){
+              console.warn("Scorers: no source worked, keeping previous values");
               const keepG = Number(current.goals);
               return { capo_actual: Array.isArray(current.capo_actual)? current.capo_actual : [],
                        goals: Number.isFinite(keepG)? keepG : null,
@@ -183,7 +208,7 @@ jobs:
                 const j = await http(u, "json");
                 (j?.children || j?.standings || []).forEach(walk);
                 if (out.size) return out;
-              } catch {}
+              } catch(e){ console.warn("Standing API fail:", e.message); }
             }
             return out;
           }
@@ -199,7 +224,7 @@ jobs:
           }
           async function fetchOneDay(dayISO){
             const urls=[]; for (const api of ESPN_SB_APIS){ urls.push(`${api}?calendardate=${dayISO}`); urls.push(`${api}?dates=${dayISO}`); }
-            for (const u of urls){ try{ const j=await http(u,"json"); const ev=Array.isArray(j?.events)?j.events:[]; if(ev.length) return ev; }catch{} }
+            for (const u of urls){ try{ const j=await http(u,"json"); const ev=Array.isArray(j?.events)?j.events:[]; if(ev.length) return ev; }catch(e){ console.warn("Scoreboard fail:", e.message); } }
             return [];
           }
           async function fetchResults(){
@@ -227,7 +252,7 @@ jobs:
 
           (async () => {
             try {
-              const current = await readCurrent();
+              const current  = await readCurrent();
 
               const htmlStand = await http(ESPN_STAND);
               const stand     = parseEspnStandings(htmlStand);
@@ -236,15 +261,15 @@ jobs:
               const played    = stand.teams.map(n => statsMap.get(keyTeam(n))?.played ?? null);
               const points    = stand.teams.map(n => statsMap.get(keyTeam(n))?.points ?? null);
 
-              const scorers   = await getScorers(current);   // marcatori
-              const res       = await fetchResults();        // risultati
+              const scorers   = await getScorers(current);
+              const res       = await fetchResults();
 
               const payload = {
                 ...current,
                 teams: stand.teams.slice(0,20),
                 pos_real: stand.pos_real.slice(0,20),
-                played,                       // 👈 PG
-                points,                       // 👈 Pti
+                played,
+                points,
                 capo_actual: (scorers.capo_actual && scorers.capo_actual.length) ? scorers.capo_actual : (current.capo_actual || []),
                 goals: Number.isFinite(+scorers.goals) ? +scorers.goals : (Number.isFinite(+current.goals) ? +current.goals : null),
                 results_raw: res.results_raw,
@@ -260,8 +285,7 @@ jobs:
               };
 
               await writeGist(payload);
-              console.log("OK",
-                payload._sources,
+              console.log("✅ Gist updated",
                 `teams=${payload.teams.length}`,
                 `PG=${payload.played.filter(v=>Number.isFinite(v)).length}`,
                 `Pti=${payload.points.filter(v=>Number.isFinite(v)).length}`,
@@ -269,8 +293,9 @@ jobs:
                 `res=${payload.results_str?.length||0}`
               );
             } catch (e) {
-              console.error("Sync failed:", e?.message || e);
-              process.exit(1);
+              // Soft-fail: non bloccare il job per errori di rete/sorgenti terze
+              console.error("⚠️ Sync soft-failed:", e?.stack || e);
+              process.exitCode = 0;
             }
           })();
           NODE
