@@ -4,17 +4,16 @@ name: Update Gist (Serie A)
 
 on:
   schedule:
-    - cron: "*/20 * * * 5"   # Venerdì (UTC)
-    - cron: "*/20 * * * 6"   # Sabato  (UTC)
-    - cron: "*/20 * * * 0"   # Domenica(UTC)
-    - cron: "*/20 * * * 1"   # Lunedì  (UTC)
+    # 23:00 Europe/Rome (CEST=UTC+2 → 21:00 UTC; CET=UTC+1 → 22:00 UTC)
+    - cron: "0 21 * * 5,6,0,1"   # CEST: ven/sab/dom/lun
+    - cron: "0 22 * * 5,6,0,1"   # CET:  ven/sab/dom/lun
   workflow_dispatch: {}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Node 20 (stable fetch)
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -29,7 +28,7 @@ jobs:
           test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN secret"; exit 1; }
           echo "✅ Secrets present"
 
-      - name: Run inline Node (standings + results + scorers + PG/Pti) con override manuale e retry
+      - name: Run inline Node (standings + results + scorers + PG/Pti) con override manuale
         shell: bash
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -37,6 +36,16 @@ jobs:
           GIST_FILE:  Classifica.json
         run: |
           node - <<'NODE'
+          // ===== Guard 23:00 Europe/Rome =====
+          {
+            const now = new Date();
+            const hRome = new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Rome",hour:"2-digit",hour12:false}).format(now);
+            if (hRome !== "23") {
+              console.log("⏭️ Not 23:00 Europe/Rome, skipping. Local hour:", hRome);
+              process.exit(0);
+            }
+          }
+
           const ESPN_STAND   = "https://www.espn.com/soccer/standings/_/league/ita.1";
           const SKY_SCORERS  = "https://sport.sky.it/calcio/serie-a/classifica-marcatori";
           const ESPN_STATS   = "https://www.espn.com/soccer/stats/_/league/ita.1";
@@ -293,7 +302,6 @@ jobs:
                 `res=${payload.results_str?.length||0}`
               );
             } catch (e) {
-              // Soft-fail: non bloccare il job per errori di rete/sorgenti terze
               console.error("⚠️ Sync soft-failed:", e?.stack || e);
               process.exitCode = 0;
             }
