@@ -1,8 +1,7 @@
-name: Update Gist (Serie A) — football-data only
+name: Update Gist (Serie A) — football-data only (3 days, dedup, manual scorers)
 
 on:
   schedule:
-    # 23:00 Europe/Rome (CEST≈21:00 UTC, CET≈22:00 UTC)
     - cron: "0 21 * * 5,6,0,1"
     - cron: "0 22 * * 5,6,0,1"
   workflow_dispatch:
@@ -80,8 +79,8 @@ jobs:
             return { teams, pos_real:pos, played, points };
           }
 
-          // ✅ Versione definitiva anti-ripetizione ticker
-          async function fetchMatchesFriMon(){
+          // ✅ Solo partite ultimi 3 giorni (72h) + deduplicazione
+          async function fetchMatchesLast3Days(current = {}){
             const today = new Date();
             const from = new Date(today);
             from.setUTCDate(from.getUTCDate() - 3);
@@ -101,63 +100,67 @@ jobs:
               const sa   = (m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null);
               const start = m.utcDate || null;
               return { home, away, sh, sa, status: st, start };
-            }).sort((a,b) => String(a.start||'').localeCompare(String(b.start||'')));
+            });
 
-            // 🧹 Deduplicazione intelligente
+            // 🔁 Deduplica tra partite nuove e vecchie del Gist
+            const combined = [ ...(current.results_raw || []), ...rows ];
             const latest = new Map();
-            for (const r of rows) {
-              const key = `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
+            const rank = s => s === 'in' ? 3 : s === 'post' ? 2 : s === 'pre' ? 1 : 0;
+
+            for (const r of combined) {
+              const key = `${(r.home||'').toLowerCase()}|${(r.away||'').toLowerCase()}`;
               const prev = latest.get(key);
-              const rank = s => s === 'post' ? 3 : s === 'in' ? 2 : s === 'pre' ? 0 : 1;
               if (!prev || rank(r.status) >= rank(prev.status)) {
                 latest.set(key, r);
               }
             }
 
-            const results = [];
-            for (const r of latest.values()) {
-              if (r.status === 'pre') continue;
-              const scoreH = Number.isFinite(+r.sh) ? r.sh : '–';
-              const scoreA = Number.isFinite(+r.sa) ? r.sa : '–';
-              results.push(`${r.home} ${scoreH}–${scoreA} ${r.away}`);
-            }
+            // 🧹 Filtra solo partite ultimi 3 giorni
+            const filtered = Array.from(latest.values()).filter(r => {
+              if (!r.start) return false;
+              const s = new Date(r.start);
+              return s >= from && s <= today;
+            });
 
-            return { results_raw: Array.from(latest.values()), results_str: results };
+            const results = filtered
+              .filter(r => r.status !== 'pre')
+              .map(r => `${r.home} ${r.sh ?? '–'}–${r.sa ?? '–'} ${r.away}`);
+
+            return { results_raw: filtered.sort((a,b)=>String(a.start).localeCompare(String(b.start))), results_str: results };
           }
 
           (async () => {
             const current = await readCurrent();
             const st  = await fetchStandings();
-            const mx  = await fetchMatchesFriMon();
-
-            const L = { all: !!current.lock_all, stand: !!current.lock_standings, results: !!current.lock_results, played: !!current.lock_played, points: !!current.lock_points };
+            const mx  = await fetchMatchesLast3Days(current); // dedup e filtro
 
             const payload = {
               ...current,
-              teams    : L.all||L.stand ? (current.teams||[])    : st.teams,
-              pos_real : L.all||L.stand ? (current.pos_real||[]) : st.pos_real,
-              played   : L.all||L.played ? (current.played||[])  : st.played,
-              points   : L.all||L.points ? (current.points||[])  : st.points,
-              results_raw: L.all||L.results ? (current.results_raw||[]) : mx.results_raw,
-              results_str: L.all||L.results ? (current.results_str||[]) : mx.results_str,
+              teams    : st.teams,
+              pos_real : st.pos_real,
+              played   : st.played,
+              points   : st.points,
+              results_raw: mx.results_raw,
+              results_str: mx.results_str,
+
+              // Capocannoniere sempre manuale
+              capo_manual : current.capo_manual || [],
+              goals_manual: current.goals_manual || null,
+              capo_actual : current.capo_actual || current.capo_manual || [],
+              goals       : current.goals || current.goals_manual || null,
+
               synced_at: new Date().toISOString(),
               _sources : {
                 provider : 'football-data.org',
                 standings: 'football-data_standings',
                 results  : 'football-data_matches',
-                scorers  : Array.isArray(current.capo_manual)&&current.capo_manual.length ? 'manual' : 'manual'
+                scorers  : 'manual'
               }
             };
 
-            if (payload._sources.provider !== 'football-data.org') {
-              throw new Error('Provider check failed: not football-data.org');
-            }
-
             await writeGist(payload);
-            console.log('✅ Gist updated (FD only)',
+            console.log('✅ Gist updated (FD only, 3 days dedup, manual scorers)',
               `teams=${payload.teams.length}`,
-              `PG=${payload.played.filter(v=>Number.isFinite(v)).length}`,
-              `Pti=${payload.points.filter(v=>Number.isFinite(v)).length}`,
               `res=${payload.results_str.length}`
             );
           })().catch(e=>{ console.error(e); process.exit(1); });
