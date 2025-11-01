@@ -1,4 +1,4 @@
-name: Update Gist (Serie A) — clean dedup (manual scorers, 3 days only)
+name: Update Gist (Serie A) — clean dedup final (manual scorers, 72h filter)
 
 on:
   schedule:
@@ -30,7 +30,7 @@ jobs:
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
           echo "✅ Secrets OK"
 
-      - name: Build & push Gist (dedup, clean, 3 days only)
+      - name: Build & push Gist (dedup + strict 72h filter)
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -40,10 +40,9 @@ jobs:
         run: |
           node - <<'NODE'
           const FD = 'https://api.football-data.org/v4';
-          const COMP = 'SA'; // Serie A
-          const HEAD = { 'X-Auth-Token': process.env.FD_TOKEN, 'User-Agent':'fantacena-updater' };
+          const COMP = 'SA';
+          const HEAD = { 'X-Auth-Token': process.env.FD_TOKEN, 'User-Agent': 'fantacena-updater' };
 
-          // Guard 23:00 Europe/Rome (skippabile)
           (function(){
             const force = String(process.env.FORCE_RUN||'false').toLowerCase()==='true';
             if (force) return console.log('⚠️ FORCE_RUN=true');
@@ -78,16 +77,14 @@ jobs:
             return { teams, pos_real:pos, played, points };
           }
 
-          // ✅ Fetch ultimi 3 giorni + dedup + no vecchie partite
+          // ✅ Fetch ultimi 3 giorni reali (72 ore effettive) + dedup
           async function fetchMatches3Days(current={}){
-            const today = new Date();
-            const from = new Date(today);
-            from.setUTCDate(from.getUTCDate() - 3);
-
+            const now = new Date();
+            const cutoff = new Date(now.getTime() - 72 * 60 * 60 * 1000);
             const pad = v => String(v).padStart(2, '0');
             const dstr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 
-            const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(today)}`);
+            const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`);
 
             const rows = (j.matches || []).map(m => ({
               home: norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla),
@@ -98,20 +95,20 @@ jobs:
               start: m.utcDate || null
             }));
 
-            const combined = [ ...rows ];
             const latest = new Map();
             const rank = s => s === 'in' ? 3 : s === 'post' ? 2 : s === 'pre' ? 1 : 0;
 
-            for (const r of combined) {
+            for (const r of rows) {
               const key = `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
               const prev = latest.get(key);
               if (!prev || rank(r.status) > rank(prev.status)) latest.set(key, r);
             }
 
+            // 🔎 Filtro temporale reale (entro 72h)
             const filtered = Array.from(latest.values()).filter(r => {
               if (!r.start) return false;
-              const s = new Date(r.start);
-              return s >= from && s <= today;
+              const dt = new Date(r.start);
+              return dt >= cutoff && dt <= now;
             });
 
             const results = filtered
@@ -148,6 +145,6 @@ jobs:
             };
 
             await writeGist(payload);
-            console.log('✅ Gist updated (3 days clean dedup)');
+            console.log('✅ Gist updated (clean dedup, 72h filter, manual scorers)');
           })().catch(e=>{ console.error(e); process.exit(1); });
           NODE
