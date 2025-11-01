@@ -78,23 +78,50 @@ jobs:
             const points  = standings.map(r => r.points ?? null);
             return { teams, pos_real:pos, played, points };
           }
+
+          // ✅ Versione aggiornata anti-duplicato
           async function fetchMatchesFriMon(){
             // finestra ampia: ultimi 4 giorni (ven-lun)
             const today = new Date();
-            const from = new Date(today); from.setUTCDate(from.getUTCDate()-3);
-            const pad = v=>String(v).padStart(2,'0');
-            const dstr = d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+            const from = new Date(today);
+            from.setUTCDate(from.getUTCDate() - 3);
+
+            const pad = v => String(v).padStart(2, '0');
+            const dstr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+
+            // Scarica partite
             const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(today)}`);
-            const rows = (j.matches||[]).map(m=>{
+
+            // Normalizza
+            const rows = (j.matches || []).map(m => {
               const home = norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla);
               const away = norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla);
-              const st   = m.status && /FINISHED|IN_PLAY|PAUSED/.test(m.status) ? (m.status==='FINISHED'?'post':'in') : 'pre';
+              const st   = m.status && /FINISHED|IN_PLAY|PAUSED/.test(m.status)
+                ? (m.status === 'FINISHED' ? 'post' : 'in')
+                : 'pre';
               const sh   = (m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null);
               const sa   = (m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null);
-              const start= m.utcDate || null;
-              return { home, away, sh, sa, status:st, start };
-            }).sort((a,b)=>String(a.start||'').localeCompare(String(b.start||'')));
-            const results_str = rows.filter(r=>r.status!=='pre').map(r=>`${r.home} ${Number.isFinite(+r.sh)?r.sh:'–'}–${Number.isFinite(+r.sa)?r.sa:'–'} ${r.away}`);
+              const start = m.utcDate || null;
+              return { home, away, sh, sa, status: st, start };
+            }).sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+
+            // 🔒 Evita duplicati e filtra solo match reali
+            const seen = new Set();
+            const results = [];
+
+            for (const r of rows) {
+              const key = `${r.home}|${r.away}|${r.start}`;
+              if (seen.has(key)) continue; // ignora duplicati
+              seen.add(key);
+
+              if (r.status === 'pre') continue; // ignora non iniziate
+
+              const scoreH = Number.isFinite(+r.sh) ? r.sh : '–';
+              const scoreA = Number.isFinite(+r.sa) ? r.sa : '–';
+              results.push(`${r.home} ${scoreH}–${scoreA} ${r.away}`);
+            }
+
+            const results_str = results;
             return { results_raw: rows, results_str };
           }
 
@@ -120,7 +147,7 @@ jobs:
                 provider : 'football-data.org',
                 standings: 'football-data_standings',
                 results  : 'football-data_matches',
-                scorers  : Array.isArray(current.capo_manual)&&current.capo_manual.length ? 'manual' : 'manual' // manteniamo manual per i marcatori
+                scorers  : Array.isArray(current.capo_manual)&&current.capo_manual.length ? 'manual' : 'manual'
               }
             };
 
