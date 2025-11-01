@@ -69,6 +69,7 @@ jobs:
 
           // ---- FOOTBALL-DATA ----
           function norm(name){ return String(name||'').replace(/\s+/g,' ').trim(); }
+
           async function fetchStandings(){
             const j = await http(`${FD}/competitions/${COMP}/standings`);
             const standings = j.standings?.find(s=>/TOTAL/i.test(s.type))?.table || [];
@@ -79,9 +80,8 @@ jobs:
             return { teams, pos_real:pos, played, points };
           }
 
-          // ✅ Versione aggiornata anti-duplicato
+          // ✅ Versione definitiva anti-ripetizione ticker
           async function fetchMatchesFriMon(){
-            // finestra ampia: ultimi 4 giorni (ven-lun)
             const today = new Date();
             const from = new Date(today);
             from.setUTCDate(from.getUTCDate() - 3);
@@ -89,10 +89,8 @@ jobs:
             const pad = v => String(v).padStart(2, '0');
             const dstr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 
-            // Scarica partite
             const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(today)}`);
 
-            // Normalizza
             const rows = (j.matches || []).map(m => {
               const home = norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla);
               const away = norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla);
@@ -103,35 +101,35 @@ jobs:
               const sa   = (m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null);
               const start = m.utcDate || null;
               return { home, away, sh, sa, status: st, start };
-            }).sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+            }).sort((a,b) => String(a.start||'').localeCompare(String(b.start||'')));
 
-            // 🔒 Evita duplicati e filtra solo match reali
-            const seen = new Set();
-            const results = [];
-
+            // 🧹 Deduplicazione intelligente
+            const latest = new Map();
             for (const r of rows) {
-              const key = `${r.home}|${r.away}|${r.start}`;
-              if (seen.has(key)) continue; // ignora duplicati
-              seen.add(key);
+              const key = `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
+              const prev = latest.get(key);
+              const rank = s => s === 'post' ? 3 : s === 'in' ? 2 : s === 'pre' ? 0 : 1;
+              if (!prev || rank(r.status) >= rank(prev.status)) {
+                latest.set(key, r);
+              }
+            }
 
-              if (r.status === 'pre') continue; // ignora non iniziate
-
+            const results = [];
+            for (const r of latest.values()) {
+              if (r.status === 'pre') continue;
               const scoreH = Number.isFinite(+r.sh) ? r.sh : '–';
               const scoreA = Number.isFinite(+r.sa) ? r.sa : '–';
               results.push(`${r.home} ${scoreH}–${scoreA} ${r.away}`);
             }
 
-            const results_str = results;
-            return { results_raw: rows, results_str };
+            return { results_raw: Array.from(latest.values()), results_str: results };
           }
 
           (async () => {
             const current = await readCurrent();
-
             const st  = await fetchStandings();
             const mx  = await fetchMatchesFriMon();
 
-            // lock opzionali nel Gist
             const L = { all: !!current.lock_all, stand: !!current.lock_standings, results: !!current.lock_results, played: !!current.lock_played, points: !!current.lock_points };
 
             const payload = {
@@ -151,7 +149,6 @@ jobs:
               }
             };
 
-            // ENFORCE: fallisci se provider non è football-data
             if (payload._sources.provider !== 'football-data.org') {
               throw new Error('Provider check failed: not football-data.org');
             }
