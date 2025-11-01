@@ -1,4 +1,4 @@
-name: Update Gist (Serie A) — football-data only (3 days, dedup, manual scorers)
+name: Update Gist (Serie A) — clean dedup (manual scorers, 3 days only)
 
 on:
   schedule:
@@ -30,7 +30,7 @@ jobs:
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
           echo "✅ Secrets OK"
 
-      - name: Build & push Gist (FD only)
+      - name: Build & push Gist (dedup, clean, 3 days only)
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -66,21 +66,20 @@ jobs:
             await gh(`https://api.github.com/gists/${process.env.GIST_ID}`, { method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify(body) });
           }
 
-          // ---- FOOTBALL-DATA ----
           function norm(name){ return String(name||'').replace(/\s+/g,' ').trim(); }
 
           async function fetchStandings(){
             const j = await http(`${FD}/competitions/${COMP}/standings`);
             const standings = j.standings?.find(s=>/TOTAL/i.test(s.type))?.table || [];
-            const teams   = standings.map(r => norm(r.team?.shortName || r.team?.name || r.team?.tla || r.team?.name));
+            const teams   = standings.map(r => norm(r.team?.shortName || r.team?.name || r.team?.tla));
             const pos     = standings.map((_,i)=>i+1);
             const played  = standings.map(r => r.playedGames ?? null);
             const points  = standings.map(r => r.points ?? null);
             return { teams, pos_real:pos, played, points };
           }
 
-          // ✅ Solo partite ultimi 3 giorni (72h) + deduplicazione
-          async function fetchMatchesLast3Days(current = {}){
+          // ✅ Fetch ultimi 3 giorni + dedup + no vecchie partite
+          async function fetchMatches3Days(current={}){
             const today = new Date();
             const from = new Date(today);
             from.setUTCDate(from.getUTCDate() - 3);
@@ -90,32 +89,25 @@ jobs:
 
             const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(today)}`);
 
-            const rows = (j.matches || []).map(m => {
-              const home = norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla);
-              const away = norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla);
-              const st   = m.status && /FINISHED|IN_PLAY|PAUSED/.test(m.status)
-                ? (m.status === 'FINISHED' ? 'post' : 'in')
-                : 'pre';
-              const sh   = (m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null);
-              const sa   = (m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null);
-              const start = m.utcDate || null;
-              return { home, away, sh, sa, status: st, start };
-            });
+            const rows = (j.matches || []).map(m => ({
+              home: norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla),
+              away: norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla),
+              sh:   m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null,
+              sa:   m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null,
+              status: /FINISHED|IN_PLAY|PAUSED/.test(m.status) ? (m.status === 'FINISHED' ? 'post' : 'in') : 'pre',
+              start: m.utcDate || null
+            }));
 
-            // 🔁 Deduplica tra partite nuove e vecchie del Gist
-            const combined = [ ...(current.results_raw || []), ...rows ];
+            const combined = [ ...rows ];
             const latest = new Map();
             const rank = s => s === 'in' ? 3 : s === 'post' ? 2 : s === 'pre' ? 1 : 0;
 
             for (const r of combined) {
-              const key = `${(r.home||'').toLowerCase()}|${(r.away||'').toLowerCase()}`;
+              const key = `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
               const prev = latest.get(key);
-              if (!prev || rank(r.status) >= rank(prev.status)) {
-                latest.set(key, r);
-              }
+              if (!prev || rank(r.status) > rank(prev.status)) latest.set(key, r);
             }
 
-            // 🧹 Filtra solo partite ultimi 3 giorni
             const filtered = Array.from(latest.values()).filter(r => {
               if (!r.start) return false;
               const s = new Date(r.start);
@@ -132,36 +124,30 @@ jobs:
           (async () => {
             const current = await readCurrent();
             const st  = await fetchStandings();
-            const mx  = await fetchMatchesLast3Days(current); // dedup e filtro
+            const mx  = await fetchMatches3Days(current);
 
             const payload = {
               ...current,
-              teams    : st.teams,
-              pos_real : st.pos_real,
-              played   : st.played,
-              points   : st.points,
+              teams: st.teams,
+              pos_real: st.pos_real,
+              played: st.played,
+              points: st.points,
               results_raw: mx.results_raw,
               results_str: mx.results_str,
-
-              // Capocannoniere sempre manuale
-              capo_manual : current.capo_manual || [],
+              capo_manual: current.capo_manual || [],
               goals_manual: current.goals_manual || null,
-              capo_actual : current.capo_actual || current.capo_manual || [],
-              goals       : current.goals || current.goals_manual || null,
-
+              capo_actual: current.capo_actual || current.capo_manual || [],
+              goals: current.goals || current.goals_manual || null,
               synced_at: new Date().toISOString(),
-              _sources : {
-                provider : 'football-data.org',
+              _sources: {
+                provider: 'football-data.org',
                 standings: 'football-data_standings',
-                results  : 'football-data_matches',
-                scorers  : 'manual'
+                results: 'football-data_matches',
+                scorers: 'manual'
               }
             };
 
             await writeGist(payload);
-            console.log('✅ Gist updated (FD only, 3 days dedup, manual scorers)',
-              `teams=${payload.teams.length}`,
-              `res=${payload.results_str.length}`
-            );
+            console.log('✅ Gist updated (3 days clean dedup)');
           })().catch(e=>{ console.error(e); process.exit(1); });
           NODE
