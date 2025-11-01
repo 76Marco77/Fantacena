@@ -2,8 +2,11 @@ name: Update Gist (Serie A) — clean dedup final (manual scorers, 72h filter)
 
 on:
   schedule:
-    - cron: "0 21 * * 5,6,0,1"
-    - cron: "0 22 * * 5,6,0,1"
+    # Venerdì e Sabato: alle 18:00 e poi ogni ora fino alle 23:00 (orari locali Europe/Rome),
+    # coperti in UTC per entrambe le stagioni CET/CEST; il guard filtra gli orari locali esatti.
+    - cron: "0 16-22 * * 5,6"
+    # Domenica: dalle 12:30 ogni ora fino alle 23:30 (orari locali Europe/Rome)
+    - cron: "30 10-22 * * 0"
   workflow_dispatch:
     inputs:
       force:
@@ -46,8 +49,20 @@ jobs:
           (function(){
             const force = String(process.env.FORCE_RUN||'false').toLowerCase()==='true';
             if (force) return console.log('⚠️ FORCE_RUN=true');
-            const hr = new Intl.DateTimeFormat('it-IT',{timeZone:'Europe/Rome',hour:'2-digit',hour12:false}).format(new Date());
-            if (hr !== '23') { console.log('⏭️ Not 23:00 Europe/Rome (',hr,')'); process.exit(0); }
+            const tz = 'Europe/Rome';
+            const now = new Date();
+            const wd  = new Intl.DateTimeFormat('en-GB',{timeZone:tz, weekday:'short'}).format(now); // Fri, Sat, Sun
+            const hr  = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, hour:'2-digit', hour12:false}).format(now));
+            const min = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, minute:'2-digit'}).format(now));
+
+            const isFriSat = (wd==='Fri' || wd==='Sat') && min===0 && hr>=18 && hr<=23;
+            const isSun    = (wd==='Sun') && min===30 && hr>=12 && hr<=23;
+
+            if (!(isFriSat || isSun)) {
+              const hh = String(hr).padStart(2,'0'), mm = String(min).padStart(2,'0');
+              console.log(`⏭️ Outside allowed window Europe/Rome: ${wd} ${hh}:${mm}`);
+              process.exit(0);
+            }
           })();
 
           async function http(u){ const r=await fetch(u,{headers:HEAD}); if(!r.ok) throw new Error(`${r.status} ${u}`); return r.json(); }
