@@ -1,12 +1,15 @@
+# .github/workflows/update-gist-serie-a.yml
 name: Update Gist (Serie A) — clean dedup final (manual scorers, 72h filter)
 
 on:
   schedule:
-    # Venerdì e Sabato: alle 18:00 e poi ogni ora fino alle 23:00 (orari locali Europe/Rome),
-    # coperti in UTC per entrambe le stagioni CET/CEST; il guard filtra gli orari locali esatti.
-    - cron: "0 16-22 * * 5,6"
-    # Domenica: dalle 12:30 ogni ora fino alle 23:30 (orari locali Europe/Rome)
+    # Venerdì, Sabato, Lunedì: alle 18:00 e poi ogni ora fino a mezzanotte (orario Europe/Rome).
+    # Finestre in UTC che coprono sia CET che CEST; il guard filtra l'orario locale esatto.
+    - cron: "0 16-23 * * 5,6,1"
+    # Domenica: dalle 12:30 ogni ora fino alle 23:30 (Europe/Rome)
     - cron: "30 10-22 * * 0"
+    # Domenica: run extra per 00:00 locale (copre CEST=22:00Z e CET=23:00Z)
+    - cron: "0 22-23 * * 0"
   workflow_dispatch:
     inputs:
       force:
@@ -51,14 +54,26 @@ jobs:
             if (force) return console.log('⚠️ FORCE_RUN=true');
             const tz = 'Europe/Rome';
             const now = new Date();
-            const wd  = new Intl.DateTimeFormat('en-GB',{timeZone:tz, weekday:'short'}).format(now); // Fri, Sat, Sun
+            const wd  = new Intl.DateTimeFormat('en-GB',{timeZone:tz, weekday:'short'}).format(now); // Fri, Sat, Sun, Mon, Tue
             const hr  = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, hour:'2-digit', hour12:false}).format(now));
             const min = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, minute:'2-digit'}).format(now));
 
-            const isFriSat = (wd==='Fri' || wd==='Sat') && min===0 && hr>=18 && hr<=23;
-            const isSun    = (wd==='Sun') && min===30 && hr>=12 && hr<=23;
+            const inRange = (a,b) => hr >= a && hr <= b;
+            const at      = (h,m) => hr === h && min === m;
 
-            if (!(isFriSat || isSun)) {
+            // Venerdì/Sabato/Lunedì: :00 da 18→23
+            const isFSM_hours    = (['Fri','Sat','Mon'].includes(wd) && min === 0 && inRange(18,23));
+            // Mezzanotte successiva: 00:00 di Sab/Dom/Mar (per i giorni Fri/Sat/Mon)
+            const isFSM_midnight = ((wd === 'Sat' || wd === 'Sun' || wd === 'Tue') && at(0,0));
+
+            // Domenica: :30 da 12:30→23:30
+            const isSun30        = (wd === 'Sun' && min === 30 && inRange(12,23));
+            // Mezzanotte dopo la Domenica: 00:00 di Lunedì
+            const isSunMid       = (wd === 'Mon' && at(0,0));
+
+            const allowed = isFSM_hours || isFSM_midnight || isSun30 || isSunMid;
+
+            if (!allowed) {
               const hh = String(hr).padStart(2,'0'), mm = String(min).padStart(2,'0');
               console.log(`⏭️ Outside allowed window Europe/Rome: ${wd} ${hh}:${mm}`);
               process.exit(0);
@@ -92,7 +107,7 @@ jobs:
             return { teams, pos_real:pos, played, points };
           }
 
-          // ✅ Fetch ultimi 3 giorni reali (72 ore effettive) + dedup
+          // ✅ Ultime 72 ore effettive + dedup
           async function fetchMatches3Days(current={}){
             const now = new Date();
             const cutoff = new Date(now.getTime() - 72 * 60 * 60 * 1000);
@@ -119,7 +134,6 @@ jobs:
               if (!prev || rank(r.status) > rank(prev.status)) latest.set(key, r);
             }
 
-            // 🔎 Filtro temporale reale (entro 72h)
             const filtered = Array.from(latest.values()).filter(r => {
               if (!r.start) return false;
               const dt = new Date(r.start);
