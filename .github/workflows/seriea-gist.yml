@@ -1,4 +1,4 @@
-# .github/workflows/update-gist-serie-a.yml
+
 name: Update Gist (Serie A) — clean dedup final (manual scorers, 72h filter)
 
 on:
