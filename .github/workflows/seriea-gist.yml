@@ -1,23 +1,20 @@
 
-# .github/workflows/update-serie-a.yml
+
 name: Update Gist (Serie A) — 72h results + next24h fixtures (merged)
 
 on:
   schedule:
-    # Ven/Sab/Lun: 18:00→23:00 locali (cron in UTC; guard filtra Europe/Rome)
-    - cron: "0 16-23 * * 5,6,1"
-    # Dom: 12:30→23:30 locali (alle :30)
-    - cron: "30 10-22 * * 0"
-    # Extra per 00:00 locali dopo la Domenica (copre CET/CEST)
-    - cron: "0 22-23 * * 0"
+    - cron: "0 16-23 * * 5,6,1"  # Ven/Sab/Lun: 18–23 locali
+    - cron: "30 10-22 * * 0"     # Dom: 12:30–23:30 locali (alle :30)
+    - cron: "0 22-23 * * 0"      # Extra per 00:00 locali post-Dom
   workflow_dispatch:
     inputs:
       force:
-        description: "Esegui subito (ignora guard orario Europe/Rome)"
+        description: "Esegui subito (ignora guard Europe/Rome)"
         required: false
         default: "false"
 
-permissions: {}  # Perché: usiamo PAT Gist, non GITHUB_TOKEN
+permissions: {}
 concurrency:
   group: update-serie-a-gist
   cancel-in-progress: false
@@ -43,7 +40,7 @@ jobs:
           test -n "$GIST_ID"    || { echo "❌ Missing GIST_ID"; exit 1; }
           test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN"; exit 1; }
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
-          echo "::add-mask::$GIST_TOKEN"   # Perché: evita leak nei log
+          echo "::add-mask::$GIST_TOKEN"
           echo "::add-mask::$FD_TOKEN"
           echo "✅ Secrets OK"
 
@@ -58,7 +55,8 @@ jobs:
           node - <<'NODE'
           const FD='https://api.football-data.org/v4', COMP='SA', TZ='Europe/Rome';
           const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fantacena-updater'};
-          const HEAD_GH={'authorization':`Bearer ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
+          // Per Gist è ok lo schema "token"
+          const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
@@ -76,10 +74,10 @@ jobs:
 
           (function guard(){
             const force=String(process.env.FORCE_RUN||'false').toLowerCase()==='true';
-            if(force){ console.log('⚠️ FORCE_RUN=true'); return; }             # Perché: debug/run manuale fuori fascia
+            if(force){ console.log('⚠️ FORCE_RUN=true'); return; }
             const now=new Date();
             const fmt=ops=>new Intl.DateTimeFormat('en-GB',{timeZone:TZ,...ops});
-            const wd=fmt({weekday:'short'}).format(now);                       # Fri/Sat/Sun/Mon/...
+            const wd=fmt({weekday:'short'}).format(now);
             const hr=+fmt({hour:'2-digit',hour12:false}).format(now);
             const min=+fmt({minute:'2-digit'}).format(now);
             const inRange=(a,b)=>hr>=a&&hr<=b, at=(h,m)=>hr===h&&min===m;
@@ -131,7 +129,7 @@ jobs:
               start:m.utcDate||null
             }));
             const latest=new Map();
-            for(const r of rows){                                       # Perché: tieni lo stato più “forte”
+            for(const r of rows){
               const k=`${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
               const p=latest.get(k); if(!p || rank(r.status)>rank(p.status)) latest.set(k,r);
             }
@@ -141,7 +139,7 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          // Solo future ≤24h, status 'pre'; esclusi POSTPONED/CANCELED/SUSPENDED (fallback se API ignora date range).
+          // Prossime 24h, solo future (pre), esclusi POSTPONED/CANCELED/SUSPENDED
           async function fetchUpcoming24hStrict(){
             const now=new Date(), end=new Date(now.getTime()+24*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -155,7 +153,6 @@ jobs:
                          sh:null, sa:null, status:'pre', start:m.utcDate||null }))
               .filter(r=>{ const t=Date.parse(r.start||''); return Number.isFinite(t)&&t>=now.getTime()&&t<=end.getTime(); })
               .sort((a,b)=>String(a.start).localeCompare(String(b.start)));
-            // dedupe home|away|start (kickoff identico)
             const seen=new Set(), out=[];
             for(const r of rows){ const k=`${r.home}|${r.away}|${r.start||""}`; if(!seen.has(k)){ seen.add(k); out.push(r); } }
             return out;
@@ -164,20 +161,19 @@ jobs:
           (async()=>{
             const current=await readCurrent();
             const st=await fetchStandings();
-            const past72=await fetchMatches3Days();          // post/in (ultime 72h)
-            const next24=await fetchUpcoming24hStrict();     // pre (prossime 24h)
+            const past72=await fetchMatches3Days();
+            const next24=await fetchUpcoming24hStrict();
 
-            // Merge unico per la UI (usa solo results_raw)
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
-            const m=new Map();
-            for(const r of [...past72, ...next24]){ if(r && r.home && r.away) m.set(key(r), r); }
-            const results_raw=[...m.values()];
+            const map=new Map();
+            for(const r of [...past72, ...next24]){ if(r && r.home && r.away) map.set(key(r), r); }
+            const results_raw=[...map.values()];
 
             const payload={
               ...current,
               teams:st.teams, pos_real:st.pos_real, played:st.played, points:st.points,
-              results_raw,                          # 👈 la UI legge pre/in/post da qui
-              upcoming_raw: next24,                 # Per diagnosi rapida
+              results_raw,
+              upcoming_raw: next24,
               counts:{
                 pre: results_raw.filter(r=>r.status==='pre').length,
                 in:  results_raw.filter(r=>r.status==='in').length,
@@ -195,5 +191,5 @@ jobs:
 
             await writeGist(payload);
             console.log(`✅ results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
-          })().catch(e=>{ console.error('❌', e.message||e); process.exit(1); });
+          })().catch(e=>{ console.error('❌', e.stack || e.message || String(e)); process.exit(1); });
           NODE
