@@ -1,23 +1,18 @@
 
-
 name: Update Gist (Serie A) — 72h results + next24h fixtures (merged)
 
 on:
   schedule:
-    - cron: "0 16-23 * * 5,6,1"  # Ven/Sab/Lun: 18–23 locali
-    - cron: "30 10-22 * * 0"     # Dom: 12:30–23:30 locali (alle :30)
+    # ⚠️ GitHub cron usa UTC (orario di Londra). I commenti sono indicativi per Europe/Rome.
+    - cron: "0 16-23 * * 5,6,1"  # Ven/Sab/Lun sera (copre CET/CEST con un po' di margine)
+    - cron: "30 10-22 * * 0"     # Dom: 12:30–23:30 locali circa
     - cron: "0 22-23 * * 0"      # Extra per 00:00 locali post-Dom
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Esegui subito (ignora guard Europe/Rome)"
-        required: false
-        default: "false"
+  workflow_dispatch: {}           # manuale (senza FORCE_RUN)
 
 permissions: {}
 concurrency:
   group: update-serie-a-gist
-  cancel-in-progress: false
+  cancel-in-progress: true        # evita sovrapposizioni
 
 jobs:
   sync:
@@ -50,13 +45,22 @@ jobs:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           FD_TOKEN:   ${{ secrets.FOOTBALL_DATA_TOKEN }}
           GIST_FILE:  Classifica.json
-          FORCE_RUN:  ${{ github.event.inputs.force }}
+          # metadati runtime
+          GITHUB_RUN_ID:       ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT:  ${{ github.run_attempt }}
+          GITHUB_REPOSITORY:   ${{ github.repository }}
+          GITHUB_WORKFLOW:     ${{ github.workflow }}
+          GITHUB_SHA:          ${{ github.sha }}
         run: |
           node - <<'NODE'
+          // file: .github/workflows/update-serie-a-gist.js (embedded)
           const FD='https://api.football-data.org/v4', COMP='SA', TZ='Europe/Rome';
           const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fantacena-updater'};
           // Per Gist è ok lo schema "token"
           const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
+
+          const fmtLocal = new Intl.DateTimeFormat('it-IT',{dateStyle:'full', timeStyle:'long', timeZone:TZ});
+          console.log('⏱️ Ora locale:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
@@ -72,25 +76,7 @@ jobs:
           async function httpFD(u){ const r=await fetchRetry(u,{headers:HEAD_FD}); return r.json(); }
           async function gh(u,opt={}){ return fetchRetry(u,{...opt,headers:{...HEAD_GH,...(opt.headers||{})}}); }
 
-          (function guard(){
-            const force=String(process.env.FORCE_RUN||'false').toLowerCase()==='true';
-            if(force){ console.log('⚠️ FORCE_RUN=true'); return; }
-            const now=new Date();
-            const fmt=ops=>new Intl.DateTimeFormat('en-GB',{timeZone:TZ,...ops});
-            const wd=fmt({weekday:'short'}).format(now);
-            const hr=+fmt({hour:'2-digit',hour12:false}).format(now);
-            const min=+fmt({minute:'2-digit'}).format(now);
-            const inRange=(a,b)=>hr>=a&&hr<=b, at=(h,m)=>hr===h&&min===m;
-            const isFSM_hours    = (['Fri','Sat','Mon'].includes(wd) && min===0 && inRange(18,23));
-            const isFSM_midnight = ((wd==='Sat'||wd==='Sun'||wd==='Tue') && at(0,0));
-            const isSun30        = (wd==='Sun' && min===30 && inRange(12,23));
-            const isSunMid       = (wd==='Mon' && at(0,0));
-            const allowed = isFSM_hours || isFSM_midnight || isSun30 || isSunMid;
-            if(!allowed){
-              console.log(`⏭️ Outside window ${TZ}: ${wd} ${String(hr).padStart(2,'0')}:${String(min).padStart(2,'0')}`);
-              process.exit(0);
-            }
-          })();
+          // ✅ NESSUN guard(): ci affidiamo solo agli orari del cron
 
           async function readCurrent(){
             const j=await (await gh(`https://api.github.com/gists/${process.env.GIST_ID}`)).json();
@@ -169,6 +155,7 @@ jobs:
             for(const r of [...past72, ...next24]){ if(r && r.home && r.away) map.set(key(r), r); }
             const results_raw=[...map.values()];
 
+            const now = new Date();
             const payload={
               ...current,
               teams:st.teams, pos_real:st.pos_real, played:st.played, points:st.points,
@@ -179,7 +166,17 @@ jobs:
                 in:  results_raw.filter(r=>r.status==='in').length,
                 post:results_raw.filter(r=>r.status==='post').length
               },
-              synced_at:new Date().toISOString(),
+              synced_at: now.toISOString(),
+              _meta:{
+                timezone: TZ,
+                now_local: new Intl.DateTimeFormat('sv-SE',{timeZone:TZ, hour12:false, dateStyle:'short', timeStyle:'medium'}).format(now),
+                now_utc: now.toISOString(),
+                run_id: process.env.GITHUB_RUN_ID || null,
+                run_attempt: process.env.GITHUB_RUN_ATTEMPT || null,
+                repo: process.env.GITHUB_REPOSITORY || null,
+                workflow: process.env.GITHUB_WORKFLOW || null,
+                sha: process.env.GITHUB_SHA || null
+              },
               _sources:{
                 provider:'football-data.org',
                 standings:'football-data_standings',
@@ -190,6 +187,6 @@ jobs:
             };
 
             await writeGist(payload);
-            console.log(`✅ results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
+            console.log(`✅ Gist aggiornato | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{ console.error('❌', e.stack || e.message || String(e)); process.exit(1); });
           NODE
