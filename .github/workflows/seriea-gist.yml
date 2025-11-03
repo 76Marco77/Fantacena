@@ -3,15 +3,11 @@ name: Update Gist (Serie A) — 72h results + next24h fixtures (merged)
 
 on:
   schedule:
-    # ⚠️ GitHub cron è in UTC
-    # Ven/Sab/Lun: ogni 15' tra le 16–23 UTC
-    - cron: "*/15 16-23 * * 5,6,1"
-    # Dom: 10:30–22:30 UTC ogni 15' (senza duplicare)
-    - cron: "30,45 10 * * 0"          # 10:30, 10:45
-    - cron: "0,15,30,45 11-21 * * 0"  # 11:00 → 21:45
-    - cron: "0,15,30 22 * * 0"        # 22:00, 22:15, 22:30
-    # Extra (mezzanotte locale in CET): 23:00–23:45 UTC, ogni 15'
-    - cron: "*/15 23 * * 0"
+    - cron: "*/15 16-23 * * 5,6,1"      # Ven/Sab/Lun ogni 15' (UTC)
+    - cron: "30,45 10 * * 0"            # Dom: 10:30,10:45
+    - cron: "0,15,30,45 11-21 * * 0"    # Dom: 11:00–21:45
+    - cron: "0,15,30 22 * * 0"          # Dom: 22:00–22:30
+    - cron: "*/15 23 * * 0"             # Dom: 23:00–23:45 (extra)
   workflow_dispatch: {}
 
 permissions: {}
@@ -42,7 +38,45 @@ jobs:
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
           echo "::add-mask::$GIST_TOKEN"
           echo "::add-mask::$FD_TOKEN"
-          echo "✅ Secrets OK"
+          echo "✅ Secrets OK (GIST_ID=${#GIST_ID} chars)"
+
+      - name: Diagnose tokens & endpoints (clear errors)
+        env:
+          GIST_ID:    ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          FD_TOKEN:   ${{ secrets.FOOTBALL_DATA_TOKEN }}
+        run: |
+          node - <<'NODE'
+          const TZ='Europe/Rome';
+          const log=(...a)=>console.log(...a);
+          const now=new Date();
+          log('⏱️ Local:', new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ}).format(now),
+              '| UTC:', now.toISOString());
+
+          const GIST_ID=process.env.GIST_ID, GH=`https://api.github.com/gists/${GIST_ID}`;
+          const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-diag'};
+          const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fd-diag'};
+
+          async function probe(url, opt){
+            const r=await fetch(url,opt).catch(e=>({ok:false,status:0, text:async()=>String(e)}));
+            const txt=await r.text();
+            const snip=txt.slice(0,300).replace(/\s+/g,' ');
+            log(`→ ${opt.method||'GET'} ${url} :: status=${r.status} ok=${r.ok}`);
+            ['x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset','x-ratelimit-available-minutes'].forEach(h=>{
+              const v=r.headers?.get?.(h); if(v) log(`   ${h}:`, v);
+            });
+            if(!r.ok){ throw new Error(`${opt.method||'GET'} ${r.status} ${url} :: ${snip}`); }
+            return txt;
+          }
+
+          (async()=>{
+            console.log('🔎 Probe GitHub Gist GET');
+            await probe(GH,{headers:HEAD_GH});
+
+            console.log('🔎 Probe Football-Data GET competitions/SA');
+            await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD});
+          })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
+          NODE
 
       - name: Build & push Gist (72h results + next24h fixtures → merged)
         env:
@@ -63,15 +97,15 @@ jobs:
           const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
 
           const fmtLocal = new Intl.DateTimeFormat('it-IT',{dateStyle:'full', timeStyle:'long', timeZone:TZ});
-          console.log('⏱️ Ora locale:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
+          console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
             for(let i=0;;i++){
-              const r=await fetch(u,opt);
+              const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
               if(r.ok) return r;
               if(![429,500,502,503,504].includes(r.status) || i>=tries-1){
-                const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t}`);
+                const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`);
               }
               await sleep(Math.round(base*Math.pow(2,i)));
             }
@@ -79,16 +113,20 @@ jobs:
           async function httpFD(u){ const r=await fetchRetry(u,{headers:HEAD_FD}); return r.json(); }
           async function gh(u,opt={}){ return fetchRetry(u,{...opt,headers:{...HEAD_GH,...(opt.headers||{})}}); }
 
-          // ✅ Nessun guard(): ci affidiamo solo al cron
-
           async function readCurrent(){
-            const j=await (await gh(`https://api.github.com/gists/${process.env.GIST_ID}`)).json();
+            const r=await gh(`https://api.github.com/gists/${process.env.GIST_ID}`);
+            const j=await r.json();
             const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
             try{ return f&&f.content?JSON.parse(f.content):{}; }catch{ return {}; }
           }
           async function writeGist(payload){
             const body={files:{[process.env.GIST_FILE||'Classifica.json']:{content:JSON.stringify(payload,null,2)}}};
-            await gh(`https://api.github.com/gists/${process.env.GIST_ID]}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+            const url=`https://api.github.com/gists/${process.env.GIST_ID}`; // fix: niente ]
+            const r=await gh(url,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+            if(!r.ok){
+              const txt=await r.text().catch(()=> '');
+              throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`);
+            }
           }
 
           const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
@@ -190,5 +228,8 @@ jobs:
 
             await writeGist(payload);
             console.log(`✅ Gist aggiornato | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
-          })().catch(e=>{ console.error('❌', e.stack || e.message || String(e)); process.exit(1); });
+          })().catch(e=>{
+            console.error('❌ FATAL:', e.stack || e.message || String(e)); // perché: vogliamo il motivo preciso
+            process.exit(1);
+          });
           NODE
