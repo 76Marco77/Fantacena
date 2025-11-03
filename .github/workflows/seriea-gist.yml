@@ -1,14 +1,14 @@
 
+
 name: Update Gist (Serie A) — clean dedup final (manual scorers, 72h filter)
 
 on:
   schedule:
-    # Venerdì, Sabato, Lunedì: alle 18:00 e poi ogni ora fino a mezzanotte (orario Europe/Rome).
-    # Finestre in UTC che coprono sia CET che CEST; il guard filtra l'orario locale esatto.
+    # Ven/Sab/Lun: 18:00→23:00 Europe/Rome (finestre UTC più larghe; guard interno filtra l'ora locale precisa)
     - cron: "0 16-23 * * 5,6,1"
-    # Domenica: dalle 12:30 ogni ora fino alle 23:30 (Europe/Rome)
+    # Dom: 12:30→23:30 Europe/Rome (finestre UTC più larghe)
     - cron: "30 10-22 * * 0"
-    # Domenica: run extra per 00:00 locale (copre CEST=22:00Z e CET=23:00Z)
+    # Dom extra: copre le 00:00 locali cross-CET/CEST
     - cron: "0 22-23 * * 0"
   workflow_dispatch:
     inputs:
@@ -17,13 +17,22 @@ on:
         required: false
         default: "false"
 
+permissions: {}                    # Perché: usiamo PAT Gist, non GITHUB_TOKEN
+concurrency:
+  group: update-serie-a-gist
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TZ: Europe/Rome            # Per log leggibili; la logica usa Intl con tz esplicita
     steps:
       - name: Setup Node
         uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: '20'
 
       - name: Check secrets
         env:
@@ -34,6 +43,8 @@ jobs:
           test -n "$GIST_ID"    || { echo "❌ Missing GIST_ID"; exit 1; }
           test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN"; exit 1; }
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
+          echo "::add-mask::$GIST_TOKEN"   # Perché: evitare leak in log
+          echo "::add-mask::$FD_TOKEN"
           echo "✅ Secrets OK"
 
       - name: Build & push Gist (dedup + strict 72h filter)
@@ -45,76 +56,116 @@ jobs:
           FORCE_RUN:  ${{ github.event.inputs.force }}
         run: |
           node - <<'NODE'
-          const FD = 'https://api.football-data.org/v4';
+          /**
+           * Update Serie A Gist: standings + ultimi 3 giorni risultati (dedup),
+           * scorer manuali, finestre orarie Europe/Rome con guard interno.
+           * Retry/backoff semplice per 429/5xx.
+           */
+          const FD  = 'https://api.football-data.org/v4';
           const COMP = 'SA';
-          const HEAD = { 'X-Auth-Token': process.env.FD_TOKEN, 'User-Agent': 'fantacena-updater' };
+          const TZ  = 'Europe/Rome';
 
-          (function(){
-            const force = String(process.env.FORCE_RUN||'false').toLowerCase()==='true';
-            if (force) return console.log('⚠️ FORCE_RUN=true');
-            const tz = 'Europe/Rome';
+          const HEAD_FD = {
+            'X-Auth-Token': process.env.FD_TOKEN,
+            'Accept': 'application/json',
+            'User-Agent': 'fantacena-updater'
+          };
+
+          const HEAD_GH = {
+            'authorization': `Bearer ${process.env.GIST_TOKEN}`, // Perché: standard GH API
+            'accept': 'application/vnd.github+json',
+            'user-agent': 'seriea-fd-only'
+          };
+
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function fetchRetry(url, opt = {}, { tries = 5, base = 400 } = {}) {
+            let attempt = 0;
+            while (true) {
+              attempt++;
+              const r = await fetch(url, opt);
+              if (r.ok) return r;
+              const retryable = [429, 500, 502, 503, 504].includes(r.status);
+              if (!retryable || attempt >= tries) {
+                const text = await r.text().catch(()=> '');
+                throw new Error(`${opt.method||'GET'} ${url} -> ${r.status} ${text}`);
+              }
+              const wait = Math.round(base * Math.pow(2, attempt-1));
+              console.log(`↻ Retry ${attempt}/${tries} ${url} in ${wait}ms (status ${r.status})`);
+              await sleep(wait);
+            }
+          }
+
+          async function httpFD(u)  { const r = await fetchRetry(u, { headers: HEAD_FD }); return r.json(); }
+          async function gh(u,opt={}) { return fetchRetry(u, { ...opt, headers: { ...HEAD_GH, ...(opt.headers||{}) } }); }
+
+          (function guard(){
+            const force = String(process.env.FORCE_RUN||'false').toLowerCase() === 'true';
+            if (force) { console.log('⚠️ FORCE_RUN=true'); return; }
+
             const now = new Date();
-            const wd  = new Intl.DateTimeFormat('en-GB',{timeZone:tz, weekday:'short'}).format(now); // Fri, Sat, Sun, Mon, Tue
-            const hr  = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, hour:'2-digit', hour12:false}).format(now));
-            const min = Number(new Intl.DateTimeFormat('en-GB',{timeZone:tz, minute:'2-digit'}).format(now));
+            const fmt = (ops)=> new Intl.DateTimeFormat('en-GB', { timeZone: TZ, ...ops });
+            const wd  = fmt({ weekday:'short' }).format(now);        // Fri/Sat/Sun/Mon/...
+            const hr  = Number(fmt({ hour:'2-digit', hour12:false }).format(now));
+            const min = Number(fmt({ minute:'2-digit' }).format(now));
 
             const inRange = (a,b) => hr >= a && hr <= b;
             const at      = (h,m) => hr === h && min === m;
 
-            // Venerdì/Sabato/Lunedì: :00 da 18→23
             const isFSM_hours    = (['Fri','Sat','Mon'].includes(wd) && min === 0 && inRange(18,23));
-            // Mezzanotte successiva: 00:00 di Sab/Dom/Mar (per i giorni Fri/Sat/Mon)
             const isFSM_midnight = ((wd === 'Sat' || wd === 'Sun' || wd === 'Tue') && at(0,0));
 
-            // Domenica: :30 da 12:30→23:30
             const isSun30        = (wd === 'Sun' && min === 30 && inRange(12,23));
-            // Mezzanotte dopo la Domenica: 00:00 di Lunedì
             const isSunMid       = (wd === 'Mon' && at(0,0));
 
             const allowed = isFSM_hours || isFSM_midnight || isSun30 || isSunMid;
-
             if (!allowed) {
               const hh = String(hr).padStart(2,'0'), mm = String(min).padStart(2,'0');
-              console.log(`⏭️ Outside allowed window Europe/Rome: ${wd} ${hh}:${mm}`);
+              console.log(`⏭️ Outside allowed window ${TZ}: ${wd} ${hh}:${mm}`);
               process.exit(0);
             }
           })();
 
-          async function http(u){ const r=await fetch(u,{headers:HEAD}); if(!r.ok) throw new Error(`${r.status} ${u}`); return r.json(); }
-          async function gh(url,opt={}) {
-            const r = await fetch(url,{...opt,headers:{'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only',...(opt.headers||{})}});
-            if (!r.ok) throw new Error(`${opt.method||'GET'} ${url} -> ${r.status}`);
-            return r;
-          }
           async function readCurrent(){
             const j = await (await gh(`https://api.github.com/gists/${process.env.GIST_ID}`)).json();
-            const f = j.files[process.env.GIST_FILE||'Classifica.json']; try { return f && f.content ? JSON.parse(f.content) : {}; } catch { return {}; }
-          }
-          async function writeGist(payload){
-            const body = { files: { [process.env.GIST_FILE||'Classifica.json']: { content: JSON.stringify(payload,null,2) } } };
-            await gh(`https://api.github.com/gists/${process.env.GIST_ID}`, { method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify(body) });
+            const f = j.files?.[process.env.GIST_FILE||'Classifica.json'];
+            try { return f && f.content ? JSON.parse(f.content) : {}; }
+            catch { return {}; }
           }
 
-          function norm(name){ return String(name||'').replace(/\s+/g,' ').trim(); }
+          async function writeGist(payload){
+            const body = {
+              files: {
+                [process.env.GIST_FILE||'Classifica.json']: {
+                  content: JSON.stringify(payload, null, 2)
+                }
+              }
+            };
+            await gh(`https://api.github.com/gists/${process.env.GIST_ID}`, {
+              method:'PATCH',
+              headers:{ 'content-type':'application/json' },
+              body: JSON.stringify(body)
+            });
+          }
+
+          const norm = s => String(s||'').replace(/\s+/g,' ').trim();
 
           async function fetchStandings(){
-            const j = await http(`${FD}/competitions/${COMP}/standings`);
-            const standings = j.standings?.find(s=>/TOTAL/i.test(s.type))?.table || [];
-            const teams   = standings.map(r => norm(r.team?.shortName || r.team?.name || r.team?.tla));
-            const pos     = standings.map((_,i)=>i+1);
-            const played  = standings.map(r => r.playedGames ?? null);
-            const points  = standings.map(r => r.points ?? null);
-            return { teams, pos_real:pos, played, points };
+            const j = await httpFD(`${FD}/competitions/${COMP}/standings`);
+            const table = j.standings?.find(s => /TOTAL/i.test(s.type))?.table || [];
+            return {
+              teams:   table.map(r => norm(r.team?.shortName || r.team?.name || r.team?.tla)),
+              pos_real:table.map((_,i)=>i+1),
+              played:  table.map(r => r.playedGames ?? null),
+              points:  table.map(r => r.points ?? null),
+            };
           }
 
-          // ✅ Ultime 72 ore effettive + dedup
-          async function fetchMatches3Days(current={}){
+          async function fetchMatches3Days(){
             const now = new Date();
-            const cutoff = new Date(now.getTime() - 72 * 60 * 60 * 1000);
-            const pad = v => String(v).padStart(2, '0');
-            const dstr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-
-            const j = await http(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`);
+            const cutoff = new Date(now.getTime() - 72*60*60*1000);
+            const pad = v => String(v).padStart(2,'0');
+            const dstr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+            const j = await httpFD(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`);
 
             const rows = (j.matches || []).map(m => ({
               home: norm(m.homeTeam?.shortName || m.homeTeam?.name || m.homeTeam?.tla),
@@ -125,39 +176,39 @@ jobs:
               start: m.utcDate || null
             }));
 
-            const latest = new Map();
-            const rank = s => s === 'in' ? 3 : s === 'post' ? 2 : s === 'pre' ? 1 : 0;
+            const strength = s => s === 'in' ? 3 : s === 'post' ? 2 : s === 'pre' ? 1 : 0;
 
+            const latest = new Map();
             for (const r of rows) {
               const key = `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
               const prev = latest.get(key);
-              if (!prev || rank(r.status) > rank(prev.status)) latest.set(key, r);
+              if (!prev || strength(r.status) > strength(prev.status)) latest.set(key, r);
             }
 
             const filtered = Array.from(latest.values()).filter(r => {
               if (!r.start) return false;
               const dt = new Date(r.start);
               return dt >= cutoff && dt <= now;
-            });
+            }).sort((a,b)=> String(a.start).localeCompare(String(b.start)));
 
             const results = filtered
               .filter(r => r.status !== 'pre')
               .map(r => `${r.home} ${r.sh ?? '–'}–${r.sa ?? '–'} ${r.away}`);
 
-            return { results_raw: filtered.sort((a,b)=>String(a.start).localeCompare(String(b.start))), results_str: results };
+            return { results_raw: filtered, results_str: results };
           }
 
           (async () => {
             const current = await readCurrent();
-            const st  = await fetchStandings();
-            const mx  = await fetchMatches3Days(current);
+            const st      = await fetchStandings();
+            const mx      = await fetchMatches3Days();
 
             const payload = {
               ...current,
-              teams: st.teams,
+              teams:    st.teams,
               pos_real: st.pos_real,
-              played: st.played,
-              points: st.points,
+              played:   st.played,
+              points:   st.points,
               results_raw: mx.results_raw,
               results_str: mx.results_str,
               capo_manual: current.capo_manual || [],
@@ -175,5 +226,5 @@ jobs:
 
             await writeGist(payload);
             console.log('✅ Gist updated (clean dedup, 72h filter, manual scorers)');
-          })().catch(e=>{ console.error(e); process.exit(1); });
+          })().catch(e => { console.error('❌', e.message || e); process.exit(1); });
           NODE
