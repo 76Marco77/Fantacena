@@ -70,7 +70,6 @@ jobs:
           GIST_TOKEN:       ${{ secrets.GIST_TOKEN }}
           FD_TOKEN:         ${{ secrets.FOOTBALL_DATA_TOKEN }}
           GIST_FILE:        Classifica.json
-          # Priorità: input manuale → repo vars → default
           UPCOMING_ORDER:   ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
           GITHUB_RUN_ID:       ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT:  ${{ github.run_attempt }}
@@ -85,8 +84,18 @@ jobs:
           const fmtLocal=new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ});
           console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
 
-          const ORDER = String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc' ? 'desc' : 'asc';
-          const cmpUpcoming=(a,b)=>{ const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||''); return ORDER==='asc'?(ta-tb):(tb-ta); };
+          // ✅ Forza ASC: dalla più prossima alla più lontana (richiesta)
+          const ORDER = 'asc';
+
+          // tie-breaker stabile su stesso orario (per evitare rimescolamenti)
+          const cmpUpcoming=(a,b)=>{
+            const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||'');
+            if (ta!==tb) return ta - tb;
+            const ah=(a.home||'').toLowerCase(), aw=(a.away||'').toLowerCase();
+            const bh=(b.home||'').toLowerCase(), bw=(b.away||'').toLowerCase();
+            const n1 = (ah+aw), n2 = (bh+bw);
+            return n1.localeCompare(n2);
+          };
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
@@ -148,7 +157,7 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          // Finestra prossime partite: 72h (puoi tornare a 24h se vuoi)
+          // Finestra prossime partite: 72h
           async function fetchUpcoming72hStrict(){
             const now=new Date(), end=new Date(now.getTime()+72*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -171,7 +180,7 @@ jobs:
             const current=await readCurrent();
             const st=await fetchStandings();
             const past72=await fetchMatches3Days();
-            const next=await fetchUpcoming72hStrict(); // cambia qui se vuoi 24h
+            const next=await fetchUpcoming72hStrict();
 
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
