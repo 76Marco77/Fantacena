@@ -1,5 +1,5 @@
 
-name: Update Gist (Serie A) — 72h results + next72h fixtures (merged)
+name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
   schedule:
@@ -8,7 +8,14 @@ on:
     - cron: "0,15,30,45 11-21 * * 0"
     - cron: "0,15,30 22 * * 0"
     - cron: "*/15 23 * * 0"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      upcoming_order:
+        description: "Ordine partite future: asc = dalla più prossima; desc = dalla più lontana"
+        required: false
+        default: asc
+        type: choice
+        options: [asc, desc]
 
 permissions: {}
 concurrency:
@@ -48,42 +55,23 @@ jobs:
         run: |
           node - <<'NODE'
           const TZ='Europe/Rome';
-          const log=(...a)=>console.log(...a);
           const now=new Date();
-          log('⏱️ Local:', new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ}).format(now),
-              '| UTC:', now.toISOString());
-
+          console.log('⏱️ Local:', new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ}).format(now),'| UTC:', now.toISOString());
           const GIST_ID=process.env.GIST_ID, GH=`https://api.github.com/gists/${GIST_ID}`;
           const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-diag'};
           const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fd-diag'};
-
-          async function probe(url, opt){
-            const r=await fetch(url,opt).catch(e=>({ok:false,status:0, text:async()=>String(e)}));
-            const txt=await r.text();
-            const snip=txt.slice(0,300).replace(/\s+/g,' ');
-            log(`→ ${opt.method||'GET'} ${url} :: status=${r.status} ok=${r.ok}`);
-            ['x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset','x-ratelimit-available-minutes'].forEach(h=>{
-              const v=r.headers?.get?.(h); if(v) log(`   ${h}:`, v);
-            });
-            if(!r.ok){ throw new Error(`${opt.method||'GET'} ${r.status} ${url} :: ${snip}`); }
-            return txt;
-          }
-
-          (async()=>{
-            console.log('🔎 Probe GitHub Gist GET');
-            await probe(GH,{headers:HEAD_GH});
-
-            console.log('🔎 Probe Football-Data GET competitions/SA');
-            await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD});
-          })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
+          async function probe(url,opt){ const r=await fetch(url,opt).catch(e=>({ok:false,status:0,text:async()=>String(e)})); const t=await r.text(); console.log(`→ ${opt?.method||'GET'} ${url} :: ${r.status} ok=${r.ok}`); if(!r.ok) throw new Error(`${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`); }
+          (async()=>{ await probe(GH,{headers:HEAD_GH}); await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD}); })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
           NODE
 
-      - name: Build & push Gist (72h results + next72h fixtures → merged)
+      - name: Build & push Gist (72h results + next fixtures → merged, order via flag)
         env:
-          GIST_ID:    ${{ secrets.GIST_ID }}
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          FD_TOKEN:   ${{ secrets.FOOTBALL_DATA_TOKEN }}
-          GIST_FILE:  Classifica.json
+          GIST_ID:          ${{ secrets.GIST_ID }}
+          GIST_TOKEN:       ${{ secrets.GIST_TOKEN }}
+          FD_TOKEN:         ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          GIST_FILE:        Classifica.json
+          # Priorità: input manuale → repo vars → default
+          UPCOMING_ORDER:   ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
           GITHUB_RUN_ID:       ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT:  ${{ github.run_attempt }}
           GITHUB_REPOSITORY:   ${{ github.repository }}
@@ -91,22 +79,20 @@ jobs:
           GITHUB_SHA:          ${{ github.sha }}
         run: |
           node - <<'NODE'
-          // file: .github/workflows/update-serie-a-gist.js (embedded)
           const FD='https://api.football-data.org/v4', COMP='SA', TZ='Europe/Rome';
           const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fantacena-updater'};
           const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
-
-          const fmtLocal = new Intl.DateTimeFormat('it-IT',{dateStyle:'full', timeStyle:'long', timeZone:TZ});
+          const fmtLocal=new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ});
           console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
+
+          const ORDER = String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc' ? 'desc' : 'asc';
+          const cmpUpcoming=(a,b)=>{ const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||''); return ORDER==='asc'?(ta-tb):(tb-ta); };
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
-            for(let i=0;;i++){
-              const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
+            for(let i=0;;i++){ const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
               if(r.ok) return r;
-              if(![429,500,502,503,504].includes(r.status) || i>=tries-1){
-                const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`);
-              }
+              if(![429,500,502,503,504].includes(r.status) || i>=tries-1){ const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`); }
               await sleep(Math.round(base*Math.pow(2,i)));
             }
           }
@@ -115,18 +101,14 @@ jobs:
 
           async function readCurrent(){
             const r=await gh(`https://api.github.com/gists/${process.env.GIST_ID}`);
-            const j=await r.json();
-            const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
+            const j=await r.json(); const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
             try{ return f&&f.content?JSON.parse(f.content):{}; }catch{ return {}; }
           }
           async function writeGist(payload){
             const body={files:{[process.env.GIST_FILE||'Classifica.json']:{content:JSON.stringify(payload,null,2)}}};
             const url=`https://api.github.com/gists/${process.env.GIST_ID}`;
             const r=await gh(url,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-            if(!r.ok){
-              const txt=await r.text().catch(()=> '');
-              throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`);
-            }
+            if(!r.ok){ const txt=await r.text().catch(()=> ''); throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`); }
           }
 
           const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
@@ -166,7 +148,7 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          // ⬇️ Cambiato: 24h → 72h
+          // Finestra prossime partite: 72h (puoi tornare a 24h se vuoi)
           async function fetchUpcoming72hStrict(){
             const now=new Date(), end=new Date(now.getTime()+72*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -179,7 +161,7 @@ jobs:
                          away:norm(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
                          sh:null, sa:null, status:'pre', start:m.utcDate||null }))
               .filter(r=>{ const t=Date.parse(r.start||''); return Number.isFinite(t)&&t>=now.getTime()&&t<=end.getTime(); })
-              .sort((a,b)=>String(a.start).localeCompare(String(b.start)));
+              .sort(cmpUpcoming);
             const seen=new Set(), out=[];
             for(const r of rows){ const k=`${r.home}|${r.away}|${r.start||""}`; if(!seen.has(k)){ seen.add(k); out.push(r); } }
             return out;
@@ -189,19 +171,19 @@ jobs:
             const current=await readCurrent();
             const st=await fetchStandings();
             const past72=await fetchMatches3Days();
-            const next72=await fetchUpcoming72hStrict();
+            const next=await fetchUpcoming72hStrict(); // cambia qui se vuoi 24h
 
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
-            for(const r of [...past72, ...next72]){ if(r && r.home && r.away) map.set(key(r), r); }
+            for(const r of [...past72, ...next]){ if(r && r.home && r.away) map.set(key(r), r); }
             const results_raw=[...map.values()];
 
-            const now = new Date();
+            const now=new Date();
             const payload={
               ...current,
               teams:st.teams, pos_real:st.pos_real, played:st.played, points:st.points,
               results_raw,
-              upcoming_raw: next72,                  // ⬅️ stessa chiave, ora 72h
+              upcoming_raw: next,
               counts:{
                 pre: results_raw.filter(r=>r.status==='pre').length,
                 in:  results_raw.filter(r=>r.status==='in').length,
@@ -210,6 +192,7 @@ jobs:
               synced_at: now.toISOString(),
               _meta:{
                 timezone: TZ,
+                order_upcoming: ORDER,
                 now_local: new Intl.DateTimeFormat('sv-SE',{timeZone:TZ, hour12:false, dateStyle:'short', timeStyle:'medium'}).format(now),
                 now_utc: now.toISOString(),
                 run_id: process.env.GITHUB_RUN_ID || null,
@@ -222,15 +205,12 @@ jobs:
                 provider:'football-data.org',
                 standings:'football-data_standings',
                 results:'football-data_matches_past72h',
-                upcoming:'football-data_matches_next72h',
+                upcoming:`football-data_matches_next_${ORDER}`,
                 scorers:'manual'
               }
             };
 
             await writeGist(payload);
-            console.log(`✅ Gist aggiornato | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
-          })().catch(e=>{
-            console.error('❌ FATAL:', e.stack || e.message || String(e)); // perché: vogliamo il motivo preciso
-            process.exit(1);
-          });
+            console.log(`✅ Gist aggiornato | upcoming order=${ORDER} | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
+          })().catch(e=>{ console.error('❌ FATAL:', e.stack||e.message||String(e)); process.exit(1); });
           NODE
