@@ -1,13 +1,13 @@
 
-name: Update Gist (Serie A) — 72h results + next24h fixtures (merged)
+name: Update Gist (Serie A) — 72h results + next72h fixtures (merged)
 
 on:
   schedule:
-    - cron: "*/15 16-23 * * 5,6,1"      # Ven/Sab/Lun ogni 15' (UTC)
-    - cron: "30,45 10 * * 0"            # Dom: 10:30,10:45
-    - cron: "0,15,30,45 11-21 * * 0"    # Dom: 11:00–21:45
-    - cron: "0,15,30 22 * * 0"          # Dom: 22:00–22:30
-    - cron: "*/15 23 * * 0"             # Dom: 23:00–23:45 (extra)
+    - cron: "*/15 16-23 * * 5,6,1"
+    - cron: "30,45 10 * * 0"
+    - cron: "0,15,30,45 11-21 * * 0"
+    - cron: "0,15,30 22 * * 0"
+    - cron: "*/15 23 * * 0"
   workflow_dispatch: {}
 
 permissions: {}
@@ -78,7 +78,7 @@ jobs:
           })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
           NODE
 
-      - name: Build & push Gist (72h results + next24h fixtures → merged)
+      - name: Build & push Gist (72h results + next72h fixtures → merged)
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -121,7 +121,7 @@ jobs:
           }
           async function writeGist(payload){
             const body={files:{[process.env.GIST_FILE||'Classifica.json']:{content:JSON.stringify(payload,null,2)}}};
-            const url=`https://api.github.com/gists/${process.env.GIST_ID}`; // fix: niente ]
+            const url=`https://api.github.com/gists/${process.env.GIST_ID}`;
             const r=await gh(url,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
             if(!r.ok){
               const txt=await r.text().catch(()=> '');
@@ -166,8 +166,9 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          async function fetchUpcoming24hStrict(){
-            const now=new Date(), end=new Date(now.getTime()+24*60*60*1000);
+          // ⬇️ Cambiato: 24h → 72h
+          async function fetchUpcoming72hStrict(){
+            const now=new Date(), end=new Date(now.getTime()+72*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
             let j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${dstr(now)}&dateTo=${dstr(end)}`);
             if(!j.matches?.length){ j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`); }
@@ -188,11 +189,11 @@ jobs:
             const current=await readCurrent();
             const st=await fetchStandings();
             const past72=await fetchMatches3Days();
-            const next24=await fetchUpcoming24hStrict();
+            const next72=await fetchUpcoming72hStrict();
 
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
-            for(const r of [...past72, ...next24]){ if(r && r.home && r.away) map.set(key(r), r); }
+            for(const r of [...past72, ...next72]){ if(r && r.home && r.away) map.set(key(r), r); }
             const results_raw=[...map.values()];
 
             const now = new Date();
@@ -200,7 +201,7 @@ jobs:
               ...current,
               teams:st.teams, pos_real:st.pos_real, played:st.played, points:st.points,
               results_raw,
-              upcoming_raw: next24,
+              upcoming_raw: next72,                  // ⬅️ stessa chiave, ora 72h
               counts:{
                 pre: results_raw.filter(r=>r.status==='pre').length,
                 in:  results_raw.filter(r=>r.status==='in').length,
@@ -220,8 +221,8 @@ jobs:
               _sources:{
                 provider:'football-data.org',
                 standings:'football-data_standings',
-                results:'football-data_matches',
-                upcoming:'football-data_matches_next24h',
+                results:'football-data_matches_past72h',
+                upcoming:'football-data_matches_next72h',
                 scorers:'manual'
               }
             };
