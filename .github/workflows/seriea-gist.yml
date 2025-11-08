@@ -3,11 +3,24 @@ name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
   schedule:
-    - cron: "*/15 16-23 * * 5,6,1"
+    # Venerdì (immutato, in UTC)
+    - cron: "*/15 16-23 * * 5"
+
+    # Sabato a partire dalle 15:00 ora di Roma (DST-aware):
+    # CEST: Apr–Oct (UTC+2) → 13–23 UTC == 15:00–01:45 locali
+    - cron: "*/15 13-23 * 4-10 6"
+    # CET: Nov–Mar (UTC+1)  → 14–23 UTC == 15:00–00:45 locali
+    - cron: "*/15 14-23 * 11,12,1,2,3 6"
+
+    # Lunedì (immutato, in UTC)
+    - cron: "*/15 16-23 * * 1"
+
+    # Domenica (immutato)
     - cron: "30,45 10 * * 0"
     - cron: "0,15,30,45 11-21 * * 0"
     - cron: "0,15,30 22 * * 0"
     - cron: "*/15 23 * * 0"
+
   workflow_dispatch:
     inputs:
       upcoming_order:
@@ -87,7 +100,6 @@ jobs:
           // ✅ Forza ASC: dalla più prossima alla più lontana (richiesta)
           const ORDER = 'asc';
 
-          // tie-breaker stabile su stesso orario (per evitare rimescolamenti)
           const cmpUpcoming=(a,b)=>{
             const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||'');
             if (ta!==tb) return ta - tb;
@@ -157,7 +169,6 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          // Finestra prossime partite: 72h
           async function fetchUpcoming72hStrict(){
             const now=new Date(), end=new Date(now.getTime()+72*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -201,7 +212,7 @@ jobs:
               synced_at: now.toISOString(),
               _meta:{
                 timezone: TZ,
-                order_upcoming: ORDER,
+                order_upcoming: 'asc',
                 now_local: new Intl.DateTimeFormat('sv-SE',{timeZone:TZ, hour12:false, dateStyle:'short', timeStyle:'medium'}).format(now),
                 now_utc: now.toISOString(),
                 run_id: process.env.GITHUB_RUN_ID || null,
@@ -214,12 +225,12 @@ jobs:
                 provider:'football-data.org',
                 standings:'football-data_standings',
                 results:'football-data_matches_past72h',
-                upcoming:`football-data_matches_next_${ORDER}`,
+                upcoming:`football-data_matches_next_asc`,
                 scorers:'manual'
               }
             };
 
             await writeGist(payload);
-            console.log(`✅ Gist aggiornato | upcoming order=${ORDER} | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
+            console.log(`✅ Gist aggiornato | sabato parte dalle 15:00 ora di Roma | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{ console.error('❌ FATAL:', e.stack||e.message||String(e)); process.exit(1); });
           NODE
