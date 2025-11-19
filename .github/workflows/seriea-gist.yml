@@ -77,7 +77,7 @@ jobs:
           (async()=>{ await probe(GH,{headers:HEAD_GH}); await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD}); })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
           NODE
 
-      - name: Build & push Gist (72h results + next fixtures → merged, order via flag)
+      - name: Build & push Gist (72h results + next 5 days fixtures → orderable)
         env:
           GIST_ID:          ${{ secrets.GIST_ID }}
           GIST_TOKEN:       ${{ secrets.GIST_TOKEN }}
@@ -97,23 +97,25 @@ jobs:
           const fmtLocal=new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ});
           console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
 
-          // ✅ Forza ASC: dalla più prossima alla più lontana (richiesta)
-          const ORDER = 'asc';
+          // ⚙️ Ordine runtime: 'asc' (dalla più prossima) o 'desc' (dalla più lontana)
+          const ORDER = (String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc') ? 'desc' : 'asc';
 
           const cmpUpcoming=(a,b)=>{
             const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||'');
             if (ta!==tb) return ta - tb;
             const ah=(a.home||'').toLowerCase(), aw=(a.away||'').toLowerCase();
             const bh=(b.home||'').toLowerCase(), bw=(b.away||'').toLowerCase();
-            const n1 = (ah+aw), n2 = (bh+bw);
-            return n1.localeCompare(n2);
+            return (ah+aw).localeCompare(bh+bw);
           };
 
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
-            for(let i=0;;i++){ const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
+            for(let i=0;;i++){
+              const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
               if(r.ok) return r;
-              if(![429,500,502,503,504].includes(r.status) || i>=tries-1){ const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`); }
+              if(![429,500,502,503,504].includes(r.status) || i>=tries-1){
+                const t=await r.text().catch(()=> ''); throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`);
+              }
               await sleep(Math.round(base*Math.pow(2,i)));
             }
           }
@@ -169,19 +171,24 @@ jobs:
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
-          async function fetchUpcoming72hStrict(){
-            const now=new Date(), end=new Date(now.getTime()+72*60*60*1000);
+          // ✅ Prossime partite sui prossimi 5 giorni (ORDER: asc/desc)
+          async function fetchUpcomingNext5Days(){
+            const now=new Date(), end=new Date(now.getTime()+5*24*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
             let j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${dstr(now)}&dateTo=${dstr(end)}`);
             if(!j.matches?.length){ j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`); }
             const BAD=new Set(['POSTPONED','CANCELED','SUSPENDED','AWARDED']);
-            const rows=(j.matches||[])
+            let rows=(j.matches||[])
               .filter(m=>!BAD.has(String(m.status||'').toUpperCase()))
-              .map(m=>({ home:norm(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
-                         away:norm(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
-                         sh:null, sa:null, status:'pre', start:m.utcDate||null }))
+              .map(m=>({
+                home:norm(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
+                away:norm(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
+                sh:null, sa:null, status:'pre',
+                start:m.utcDate||null
+              }))
               .filter(r=>{ const t=Date.parse(r.start||''); return Number.isFinite(t)&&t>=now.getTime()&&t<=end.getTime(); })
               .sort(cmpUpcoming);
+            if(ORDER==='desc') rows=rows.reverse();
             const seen=new Set(), out=[];
             for(const r of rows){ const k=`${r.home}|${r.away}|${r.start||""}`; if(!seen.has(k)){ seen.add(k); out.push(r); } }
             return out;
@@ -191,7 +198,7 @@ jobs:
             const current=await readCurrent();
             const st=await fetchStandings();
             const past72=await fetchMatches3Days();
-            const next=await fetchUpcoming72hStrict();
+            const next=await fetchUpcomingNext5Days();
 
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
@@ -212,7 +219,7 @@ jobs:
               synced_at: now.toISOString(),
               _meta:{
                 timezone: TZ,
-                order_upcoming: 'asc',
+                order_upcoming: ORDER,
                 now_local: new Intl.DateTimeFormat('sv-SE',{timeZone:TZ, hour12:false, dateStyle:'short', timeStyle:'medium'}).format(now),
                 now_utc: now.toISOString(),
                 run_id: process.env.GITHUB_RUN_ID || null,
@@ -225,12 +232,12 @@ jobs:
                 provider:'football-data.org',
                 standings:'football-data_standings',
                 results:'football-data_matches_past72h',
-                upcoming:`football-data_matches_next_asc`,
+                upcoming:`football-data_matches_next_5d_${ORDER}`,
                 scorers:'manual'
               }
             };
 
             await writeGist(payload);
-            console.log(`✅ Gist aggiornato | sabato parte dalle 15:00 ora di Roma | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
+            console.log(`✅ Gist aggiornato | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{ console.error('❌ FATAL:', e.stack||e.message||String(e)); process.exit(1); });
           NODE
