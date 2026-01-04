@@ -52,6 +52,7 @@ jobs:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
         run: |
+          set -euo pipefail
           test -n "$GIST_ID"    || { echo "❌ Missing GIST_ID"; exit 1; }
           test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN"; exit 1; }
           test -n "$FD_TOKEN"   || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
@@ -121,8 +122,7 @@ jobs:
           });
           console.log("⏱️ Local:", fmtLocal.format(new Date()), "| UTC:", new Date().toISOString());
 
-          const ORDER =
-            String(process.env.UPCOMING_ORDER || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+          const ORDER = String(process.env.UPCOMING_ORDER || "asc").toLowerCase() === "desc" ? "desc" : "asc";
 
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -133,11 +133,10 @@ jobs:
               });
               if (r.ok) return r;
 
-              if (![429, 500, 502, 503, 504].includes(r.status) || i >= tries - 1) {
+              const retryable = [429, 500, 502, 503, 504].includes(r.status);
+              if (!retryable || i >= tries - 1) {
                 const t = await r.text().catch(() => "");
-                throw new Error(
-                  `${opt.method || "GET"} ${r.status} ${url} ${t.slice(0, 300).replace(/\s+/g, " ")}`
-                );
+                throw new Error(`${opt.method || "GET"} ${r.status} ${url} ${t.slice(0, 300).replace(/\s+/g, " ")}`);
               }
 
               if (r.status === 429) {
@@ -145,8 +144,7 @@ jobs:
                   Number.parseInt(r.headers.get("retry-after") || "", 10) ||
                   Number.parseInt(r.headers.get("x-requestcounter-reset") || "", 10) ||
                   0;
-                const waitMs =
-                  resetSec > 0 ? (resetSec + 1) * 1000 : Math.round(base * Math.pow(2, i));
+                const waitMs = resetSec > 0 ? (resetSec + 1) * 1000 : Math.round(base * Math.pow(2, i));
                 console.log(`⏳ 429 rate-limit: waitMs=${waitMs}`);
                 await sleep(waitMs);
                 continue;
@@ -192,9 +190,7 @@ jobs:
             });
             if (!r.ok) {
               const txt = await r.text().catch(() => "");
-              throw new Error(
-                `PATCH ${r.status} ${url} ${txt.slice(0, 300).replace(/\s+/g, " ")}`
-              );
+              throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0, 300).replace(/\s+/g, " ")}`);
             }
           }
 
@@ -204,13 +200,14 @@ jobs:
             return Number.isFinite(t) ? t : 0;
           };
 
-          const BAD_FD = new Set(["POSTPONED", "CANCELED", "CANCELLED", "SUSPENDED"]);
+          // Enum coerenti con football-data (nota: CANCELLED, non CANCELED)
+          const BAD_FD = new Set(["POSTPONED", "SUSPENDED", "CANCELLED", "CANCELED"]);
 
           function statusBucket(fdStatus) {
             const s = String(fdStatus || "").toUpperCase();
             if (s === "FINISHED" || s === "AWARDED") return "post";
-            if (["IN_PLAY", "PAUSED", "EXTRA_TIME", "PENALTY_SHOOTOUT", "LIVE"].includes(s)) return "in";
-            return "pre";
+            if (["IN_PLAY", "PAUSED", "LIVE"].includes(s)) return "in";
+            return "pre"; // SCHEDULED, TIMED, ecc.
           }
 
           function bucketRank(b) {
@@ -221,6 +218,7 @@ jobs:
             return Number.isFinite(r?.sh) && Number.isFinite(r?.sa);
           }
 
+          // Sceglie SEMPRE la versione migliore dello stesso match
           function pickBetter(a, b) {
             if (!a) return b;
             if (!b) return a;
@@ -235,10 +233,6 @@ jobs:
 
             if (hasScore(a) !== hasScore(b)) return hasScore(b) ? b : a;
 
-            const sa = ts(a.start);
-            const sb = ts(b.start);
-            if (sa !== sb) return sb > sa ? b : a;
-
             return b;
           }
 
@@ -246,6 +240,7 @@ jobs:
             const fdStatus = String(m.status || "").toUpperCase();
             const bucket = statusBucket(fdStatus);
 
+            // Fallback: a volte fullTime è null, ma regularTime ha il risultato
             const score = m.score?.fullTime ?? m.score?.regularTime ?? m.score?.halfTime ?? {};
             const sh = score.home ?? null;
             const sa = score.away ?? null;
@@ -256,7 +251,7 @@ jobs:
               away: norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla),
               sh,
               sa,
-              status: bucket,
+              status: bucket, // pre|in|post
               start: m.utcDate || null,
               lastUpdated: m.lastUpdated || null,
               _fd_status: fdStatus,
@@ -285,6 +280,7 @@ jobs:
             };
           }
 
+          // Ultime 72h: doppia chiamata (all + played) con status VALIDI
           async function fetchMatchesPast72h() {
             const now = new Date();
             const cutoff = new Date(now.getTime() - 72 * 60 * 60 * 1000);
@@ -292,8 +288,9 @@ jobs:
             const dt = dstrUTC(now);
 
             const all = await httpFD(`${FD}/competitions/${COMP}/matches?dateFrom=${df}&dateTo=${dt}`);
+
             const played = await httpFD(
-              `${FD}/competitions/${COMP}/matches?dateFrom=${df}&dateTo=${dt}&status=FINISHED,IN_PLAY,PAUSED,EXTRA_TIME,PENALTY_SHOOTOUT`
+              `${FD}/competitions/${COMP}/matches?dateFrom=${df}&dateTo=${dt}&status=FINISHED,IN_PLAY,PAUSED,LIVE`
             );
 
             const map = new Map();
@@ -324,15 +321,14 @@ jobs:
             return `${a.home}|${a.away}`.toLowerCase().localeCompare(`${b.home}|${b.away}`.toLowerCase());
           };
 
+          // Prossimi 5 giorni: NON forzo pre/null (così non rovino nulla)
           async function fetchUpcomingNext5Days() {
             const now = new Date();
             const end = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000);
             const df = dstrUTC(now);
             const dt = dstrUTC(end);
 
-            let j = await httpFD(
-              `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${df}&dateTo=${dt}`
-            );
+            let j = await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${df}&dateTo=${dt}`);
             if (!j.matches?.length) {
               j = await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`);
             }
@@ -366,6 +362,7 @@ jobs:
             const past72 = await fetchMatchesPast72h();
             const upcoming = await fetchUpcomingNext5Days();
 
+            // Merge finale: mai più "last wins"
             const merged = new Map();
             for (const r of [...past72, ...upcoming]) {
               if (!r || !r.home || !r.away) continue;
