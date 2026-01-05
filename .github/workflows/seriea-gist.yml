@@ -85,7 +85,7 @@ jobs:
           })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
           NODE
 
-      - name: Build & push Gist (72h results + next fixtures → definitive)
+      - name: Build & push Gist (72h results + next fixtures → definitive + stale refresh)
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -122,7 +122,8 @@ jobs:
           });
           console.log("⏱️ Local:", fmtLocal.format(new Date()), "| UTC:", new Date().toISOString());
 
-          const ORDER = String(process.env.UPCOMING_ORDER || "asc").toLowerCase() === "desc" ? "desc" : "asc";
+          const ORDER =
+            String(process.env.UPCOMING_ORDER || "asc").toLowerCase() === "desc" ? "desc" : "asc";
 
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -131,12 +132,15 @@ jobs:
               const r = await fetch(url, opt).catch((e) => {
                 throw new Error(`${opt.method || "GET"} fetch-failed ${url} :: ${e.message || e}`);
               });
+
               if (r.ok) return r;
 
               const retryable = [429, 500, 502, 503, 504].includes(r.status);
               if (!retryable || i >= tries - 1) {
                 const t = await r.text().catch(() => "");
-                throw new Error(`${opt.method || "GET"} ${r.status} ${url} ${t.slice(0, 300).replace(/\s+/g, " ")}`);
+                throw new Error(
+                  `${opt.method || "GET"} ${r.status} ${url} ${t.slice(0, 300).replace(/\s+/g, " ")}`
+                );
               }
 
               if (r.status === 429) {
@@ -144,13 +148,13 @@ jobs:
                   Number.parseInt(r.headers.get("retry-after") || "", 10) ||
                   Number.parseInt(r.headers.get("x-requestcounter-reset") || "", 10) ||
                   0;
-                const waitMs = resetSec > 0 ? (resetSec + 1) * 1000 : Math.round(base * Math.pow(2, i));
+                const waitMs = resetSec > 0 ? (resetSec + 1) * 1000 : Math.round(base * 2 ** i);
                 console.log(`⏳ 429 rate-limit: waitMs=${waitMs}`);
                 await sleep(waitMs);
                 continue;
               }
 
-              await sleep(Math.round(base * Math.pow(2, i)));
+              await sleep(Math.round(base * 2 ** i));
             }
           }
 
@@ -190,7 +194,9 @@ jobs:
             });
             if (!r.ok) {
               const txt = await r.text().catch(() => "");
-              throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0, 300).replace(/\s+/g, " ")}`);
+              throw new Error(
+                `PATCH ${r.status} ${url} ${txt.slice(0, 300).replace(/\s+/g, " ")}`
+              );
             }
           }
 
@@ -200,14 +206,13 @@ jobs:
             return Number.isFinite(t) ? t : 0;
           };
 
-          // Enum coerenti con football-data (nota: CANCELLED, non CANCELED)
           const BAD_FD = new Set(["POSTPONED", "SUSPENDED", "CANCELLED", "CANCELED"]);
 
           function statusBucket(fdStatus) {
             const s = String(fdStatus || "").toUpperCase();
             if (s === "FINISHED" || s === "AWARDED") return "post";
             if (["IN_PLAY", "PAUSED", "LIVE"].includes(s)) return "in";
-            return "pre"; // SCHEDULED, TIMED, ecc.
+            return "pre"; // SCHEDULED, TIMED
           }
 
           function bucketRank(b) {
@@ -218,7 +223,6 @@ jobs:
             return Number.isFinite(r?.sh) && Number.isFinite(r?.sa);
           }
 
-          // Sceglie SEMPRE la versione migliore dello stesso match
           function pickBetter(a, b) {
             if (!a) return b;
             if (!b) return a;
@@ -240,7 +244,6 @@ jobs:
             const fdStatus = String(m.status || "").toUpperCase();
             const bucket = statusBucket(fdStatus);
 
-            // Fallback: a volte fullTime è null, ma regularTime ha il risultato
             const score = m.score?.fullTime ?? m.score?.regularTime ?? m.score?.halfTime ?? {};
             const sh = score.home ?? null;
             const sa = score.away ?? null;
@@ -251,7 +254,7 @@ jobs:
               away: norm(m.awayTeam?.shortName || m.awayTeam?.name || m.awayTeam?.tla),
               sh,
               sa,
-              status: bucket, // pre|in|post
+              status: bucket,
               start: m.utcDate || null,
               lastUpdated: m.lastUpdated || null,
               _fd_status: fdStatus,
@@ -265,6 +268,7 @@ jobs:
           function pad2(v) {
             return String(v).padStart(2, "0");
           }
+
           function dstrUTC(d) {
             return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
           }
@@ -280,7 +284,6 @@ jobs:
             };
           }
 
-          // Ultime 72h: doppia chiamata (all + played) con status VALIDI
           async function fetchMatchesPast72h() {
             const now = new Date();
             const cutoff = new Date(now.getTime() - 72 * 60 * 60 * 1000);
@@ -294,7 +297,6 @@ jobs:
             );
 
             const map = new Map();
-
             for (const src of [all, played]) {
               for (const m of src.matches || []) {
                 const r = mapMatch(m);
@@ -310,25 +312,18 @@ jobs:
                 map.set(k, pickBetter(map.get(k), r));
               }
             }
-
             return Array.from(map.values()).sort((a, b) => ts(a.start) - ts(b.start));
           }
 
-          const cmpUpcoming = (a, b) => {
-            const ta = ts(a.start);
-            const tb = ts(b.start);
-            if (ta !== tb) return ta - tb;
-            return `${a.home}|${a.away}`.toLowerCase().localeCompare(`${b.home}|${b.away}`.toLowerCase());
-          };
-
-          // Prossimi 5 giorni: NON forzo pre/null (così non rovino nulla)
           async function fetchUpcomingNext5Days() {
             const now = new Date();
             const end = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000);
             const df = dstrUTC(now);
             const dt = dstrUTC(end);
 
-            let j = await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${df}&dateTo=${dt}`);
+            let j = await httpFD(
+              `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${df}&dateTo=${dt}`
+            );
             if (!j.matches?.length) {
               j = await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`);
             }
@@ -341,7 +336,7 @@ jobs:
                 const t = ts(r.start);
                 return t >= now.getTime() && t <= end.getTime();
               })
-              .sort(cmpUpcoming);
+              .sort((a, b) => ts(a.start) - ts(b.start));
 
             if (ORDER === "desc") rows = rows.reverse();
 
@@ -356,22 +351,67 @@ jobs:
             return out;
           }
 
+          async function refreshStaleMatches(results, nowMs) {
+            // stale = kickoff passato da 2h e ancora "pre"
+            const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+            const MAX_REFRESH = 20;
+
+            const stale = results
+              .filter((r) => r && r.id && r.status === "pre" && ts(r.start) > 0 && ts(r.start) <= nowMs - STALE_AFTER_MS)
+              .sort((a, b) => ts(a.start) - ts(b.start))
+              .slice(0, MAX_REFRESH);
+
+            if (!stale.length) {
+              console.log("🧼 stale refresh: 0");
+              return results;
+            }
+
+            console.log(`🧼 stale refresh: ${stale.length} (max ${MAX_REFRESH})`);
+
+            // refresh sequenziale per non ammazzare rate-limit
+            const refreshed = new Map(results.map((r) => [keyMatch(r), r]));
+
+            for (const r of stale) {
+              try {
+                const j = await httpFD(`${FD}/matches/${r.id}`);
+                const m = j.match;
+                if (!m) continue;
+
+                const upd = mapMatch(m);
+                const k = keyMatch(upd);
+                refreshed.set(k, pickBetter(refreshed.get(k), upd));
+              } catch (e) {
+                console.log(`⚠️ stale refresh failed id=${r.id}: ${String(e?.message || e).slice(0, 120)}`);
+              }
+
+              // micro-delay gentile col piano free
+              await sleep(150);
+            }
+
+            return Array.from(refreshed.values()).sort((a, b) => ts(a.start) - ts(b.start));
+          }
+
           (async () => {
             const current = await readCurrent();
             const st = await fetchStandings();
+
             const past72 = await fetchMatchesPast72h();
             const upcoming = await fetchUpcomingNext5Days();
 
-            // Merge finale: mai più "last wins"
+            // merge intelligente
             const merged = new Map();
             for (const r of [...past72, ...upcoming]) {
               if (!r || !r.home || !r.away) continue;
               const k = keyMatch(r);
               merged.set(k, pickBetter(merged.get(k), r));
             }
-            const results_raw = Array.from(merged.values()).sort((a, b) => ts(a.start) - ts(b.start));
 
+            let results_raw = Array.from(merged.values()).sort((a, b) => ts(a.start) - ts(b.start));
+
+            // refresh mirato per match "stale"
             const now = new Date();
+            results_raw = await refreshStaleMatches(results_raw, now.getTime());
+
             const payload = {
               ...current,
               teams: st.teams,
@@ -408,7 +448,7 @@ jobs:
               _sources: {
                 provider: "football-data.org",
                 standings: "football-data_standings",
-                results: "football-data_matches_past72h",
+                results: "football-data_matches_past72h + stale_refresh(/matches/{id})",
                 upcoming: `football-data_matches_next_5d_${ORDER}`,
                 scorers: "manual",
               },
