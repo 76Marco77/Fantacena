@@ -1,4 +1,4 @@
-Name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
+name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
   schedule:
