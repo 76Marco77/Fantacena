@@ -1,4 +1,3 @@
-
 name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
@@ -59,7 +58,6 @@ jobs:
           echo "::add-mask::$GIST_TOKEN"
           echo "::add-mask::$FD_TOKEN"
           echo "✅ Secrets OK (GIST_ID=${#GIST_ID} chars)"
-
       - name: Diagnose tokens & endpoints (clear errors)
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
@@ -76,7 +74,6 @@ jobs:
           async function probe(url,opt){ const r=await fetch(url,opt).catch(e=>({ok:false,status:0,text:async()=>String(e)})); const t=await r.text(); console.log(`→ ${opt?.method||'GET'} ${url} :: ${r.status} ok=${r.ok}`); if(!r.ok) throw new Error(`${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`); }
           (async()=>{ await probe(GH,{headers:HEAD_GH}); await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD}); })().catch(e=>{ console.error('❌ DIAG:', e.message); process.exit(1); });
           NODE
-
       - name: Build & push Gist (72h results + next 5 days fixtures → orderable)
         env:
           GIST_ID:          ${{ secrets.GIST_ID }}
@@ -96,10 +93,8 @@ jobs:
           const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
           const fmtLocal=new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ});
           console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
-
           // ⚙️ Ordine runtime: 'asc' (dalla più prossima) o 'desc' (dalla più lontana)
           const ORDER = (String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc') ? 'desc' : 'asc';
-
           const cmpUpcoming=(a,b)=>{
             const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||'');
             if (ta!==tb) return ta - tb;
@@ -107,7 +102,6 @@ jobs:
             const bh=(b.home||'').toLowerCase(), bw=(b.away||'').toLowerCase();
             return (ah+aw).localeCompare(bh+bw);
           };
-
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
             for(let i=0;;i++){
@@ -121,7 +115,6 @@ jobs:
           }
           async function httpFD(u){ const r=await fetchRetry(u,{headers:HEAD_FD}); return r.json(); }
           async function gh(u,opt={}){ return fetchRetry(u,{...opt,headers:{...HEAD_GH,...(opt.headers||{})}}); }
-
           async function readCurrent(){
             const r=await gh(`https://api.github.com/gists/${process.env.GIST_ID}`);
             const j=await r.json(); const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
@@ -133,10 +126,8 @@ jobs:
             const r=await gh(url,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
             if(!r.ok){ const txt=await r.text().catch(()=> ''); throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`); }
           }
-
           const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
           const rank=s=>s==='in'?3:s==='post'?2:s==='pre'?1:0;
-
           async function fetchStandings(){
             const j=await httpFD(`${FD}/competitions/${COMP}/standings`);
             const t=j.standings?.find(s=>/TOTAL/i.test(s.type))?.table||[];
@@ -147,7 +138,6 @@ jobs:
               points:  t.map(r=>r.points ?? null)
             };
           }
-
           async function fetchMatches3Days(){
             const now=new Date(), cutoff=new Date(now.getTime()-72*60*60*1000);
             const pad=v=>String(v).padStart(2,'0'), dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -170,7 +160,6 @@ jobs:
               return dt>=cutoff && dt<=now;
             }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
-
           // ✅ Prossime partite sui prossimi 5 giorni (ORDER: asc/desc)
           async function fetchUpcomingNext5Days(){
             const now=new Date(), end=new Date(now.getTime()+5*24*60*60*1000);
@@ -193,18 +182,15 @@ jobs:
             for(const r of rows){ const k=`${r.home}|${r.away}|${r.start||""}`; if(!seen.has(k)){ seen.add(k); out.push(r); } }
             return out;
           }
-
           (async()=>{
             const current=await readCurrent();
             const st=await fetchStandings();
             const past72=await fetchMatches3Days();
             const next=await fetchUpcomingNext5Days();
-
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
             for(const r of [...past72, ...next]){ if(r && r.home && r.away) map.set(key(r), r); }
             const results_raw=[...map.values()];
-
             const now=new Date();
             const payload={
               ...current,
@@ -236,7 +222,6 @@ jobs:
                 scorers:'manual'
               }
             };
-
             await writeGist(payload);
             console.log(`✅ Gist aggiornato | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{ console.error('❌ FATAL:', e.stack||e.message||String(e)); process.exit(1); });
