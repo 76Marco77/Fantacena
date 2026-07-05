@@ -1,23 +1,152 @@
-      - name: Build & push Gist (Serie A) — Fantacena 2027
+name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
+
+on:
+  schedule:
+    # Venerdì
+    - cron: "*/15 16-23 * * 5"
+
+    # Sabato a partire dalle 15:00 ora di Roma
+    - cron: "*/15 13-23 * 4-10 6"
+    - cron: "*/15 14-23 * 11,12,1,2,3 6"
+
+    # Lunedì
+    - cron: "*/15 16-23 * * 1"
+
+    # Domenica
+    - cron: "30,45 10 * * 0"
+    - cron: "0,15,30,45 11-21 * * 0"
+    - cron: "0,15,30 22 * * 0"
+    - cron: "*/15 23 * * 0"
+
+  workflow_dispatch:
+    inputs:
+      upcoming_order:
+        description: "Ordine partite future: asc = dalla più prossima; desc = dalla più lontana"
+        required: false
+        default: asc
+        type: choice
+        options: [asc, desc]
+
+permissions: {}
+
+concurrency:
+  group: update-serie-a-gist
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      TZ: Europe/Rome
+
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check secrets
         env:
-          GIST_ID:          ${{ secrets.GIST_ID }}
-          GIST_TOKEN:       ${{ secrets.GIST_TOKEN }}
-          FD_TOKEN:         ${{ secrets.FOOTBALL_DATA_TOKEN }}
-          GIST_FILE:        Classifica.json
-          UPCOMING_ORDER:   ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
-          GITHUB_RUN_ID:       ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT:  ${{ github.run_attempt }}
-          GITHUB_REPOSITORY:   ${{ github.repository }}
-          GITHUB_WORKFLOW:     ${{ github.workflow }}
-          GITHUB_SHA:          ${{ github.sha }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+        run: |
+          test -n "$GIST_ID" || { echo "❌ Missing GIST_ID"; exit 1; }
+          test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN"; exit 1; }
+          test -n "$FD_TOKEN" || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
+          echo "::add-mask::$GIST_TOKEN"
+          echo "::add-mask::$FD_TOKEN"
+          echo "✅ Secrets OK"
+
+      - name: Diagnose tokens and endpoints
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
         run: |
           node - <<'NODE'
-          const FD='https://api.football-data.org/v4', COMP='SA', TZ='Europe/Rome';
+          const TZ='Europe/Rome';
+          const now=new Date();
 
-          const HEAD_FD={'X-Auth-Token':process.env.FD_TOKEN,'Accept':'application/json','User-Agent':'fantacena-updater'};
-          const HEAD_GH={'authorization':`token ${process.env.GIST_TOKEN}`,'accept':'application/vnd.github+json','user-agent':'seriea-fd-only'};
+          console.log(
+            '⏱️ Local:',
+            new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ}).format(now),
+            '| UTC:',
+            now.toISOString()
+          );
 
-          const TARGET_TEAMS = [
+          const GIST_ID=process.env.GIST_ID;
+          const GH=`https://api.github.com/gists/${GIST_ID}`;
+
+          const HEAD_GH={
+            'authorization':`token ${process.env.GIST_TOKEN}`,
+            'accept':'application/vnd.github+json',
+            'user-agent':'seriea-diag'
+          };
+
+          const HEAD_FD={
+            'X-Auth-Token':process.env.FD_TOKEN,
+            'Accept':'application/json',
+            'User-Agent':'fd-diag'
+          };
+
+          async function probe(url,opt){
+            const r=await fetch(url,opt).catch(e=>({
+              ok:false,
+              status:0,
+              text:async()=>String(e)
+            }));
+
+            const t=await r.text();
+
+            console.log(`→ ${opt?.method||'GET'} ${url} :: ${r.status} ok=${r.ok}`);
+
+            if(!r.ok){
+              throw new Error(`${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`);
+            }
+          }
+
+          (async()=>{
+            await probe(GH,{headers:HEAD_GH});
+            await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD});
+          })().catch(e=>{
+            console.error('❌ DIAG:', e.message);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Build and push Gist Serie A Fantacena 2027
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          GIST_FILE: Classifica.json
+          UPCOMING_ORDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          node - <<'NODE'
+          const FD='https://api.football-data.org/v4';
+          const COMP='SA';
+          const TZ='Europe/Rome';
+
+          const HEAD_FD={
+            'X-Auth-Token':process.env.FD_TOKEN,
+            'Accept':'application/json',
+            'User-Agent':'fantacena-updater'
+          };
+
+          const HEAD_GH={
+            'authorization':`token ${process.env.GIST_TOKEN}`,
+            'accept':'application/vnd.github+json',
+            'user-agent':'seriea-fd-only'
+          };
+
+          const TARGET_TEAMS=[
             "Atalanta",
             "Bologna",
             "Cagliari",
@@ -40,68 +169,84 @@
             "Venezia"
           ];
 
-          const TARGET_SET = new Set(TARGET_TEAMS);
+          const TARGET_SET=new Set(TARGET_TEAMS);
 
-          const cleanName = s => String(s || '')
-            .replace(/\s+/g, ' ')
-            .replace(/\./g, '')
+          const cleanName=s=>String(s||'')
+            .replace(/\s+/g,' ')
+            .replace(/\./g,'')
             .trim();
 
-          const aliasPairs = [
-            ["Atalanta BC", "Atalanta"],
-            ["Bologna FC 1909", "Bologna"],
-            ["Cagliari Calcio", "Cagliari"],
-            ["Como 1907", "Como"],
-            ["ACF Fiorentina", "Fiorentina"],
-            ["Frosinone Calcio", "Frosinone"],
-            ["Genoa CFC", "Genoa"],
-            ["FC Internazionale Milano", "Inter"],
-            ["Internazionale", "Inter"],
-            ["Inter Milan", "Inter"],
-            ["Juventus FC", "Juventus"],
-            ["SS Lazio", "Lazio"],
-            ["US Lecce", "Lecce"],
-            ["AC Milan", "Milan"],
-            ["AC Monza", "Monza"],
-            ["SSC Napoli", "Napoli"],
-            ["Parma Calcio 1913", "Parma"],
-            ["AS Roma", "Roma"],
-            ["US Sassuolo Calcio", "Sassuolo"],
-            ["US Sassuolo", "Sassuolo"],
-            ["Torino FC", "Torino"],
-            ["Udinese Calcio", "Udinese"],
-            ["Venezia FC", "Venezia"],
+          const aliasPairs=[
+            ["Atalanta BC","Atalanta"],
+            ["Bologna FC 1909","Bologna"],
+            ["Cagliari Calcio","Cagliari"],
+            ["Como 1907","Como"],
+            ["ACF Fiorentina","Fiorentina"],
+            ["Frosinone Calcio","Frosinone"],
+            ["Genoa CFC","Genoa"],
+            ["FC Internazionale Milano","Inter"],
+            ["Internazionale","Inter"],
+            ["Inter Milan","Inter"],
+            ["Juventus FC","Juventus"],
+            ["SS Lazio","Lazio"],
+            ["US Lecce","Lecce"],
+            ["AC Milan","Milan"],
+            ["AC Monza","Monza"],
+            ["SSC Napoli","Napoli"],
+            ["Parma Calcio 1913","Parma"],
+            ["AS Roma","Roma"],
+            ["US Sassuolo Calcio","Sassuolo"],
+            ["US Sassuolo","Sassuolo"],
+            ["Torino FC","Torino"],
+            ["Udinese Calcio","Udinese"],
+            ["Venezia FC","Venezia"],
 
-            // conversioni vecchio file → nuovo Fantacena 2027
-            ["Cremonese", "Frosinone"],
-            ["US Cremonese", "Frosinone"],
-            ["Hellas Verona", "Monza"],
-            ["Verona", "Monza"],
-            ["AC Pisa", "Venezia"],
-            ["Pisa", "Venezia"],
-            ["Pisa SC", "Venezia"]
+            ["Cremonese","Frosinone"],
+            ["US Cremonese","Frosinone"],
+            ["Hellas Verona","Monza"],
+            ["Verona","Monza"],
+            ["AC Pisa","Venezia"],
+            ["Pisa","Venezia"],
+            ["Pisa SC","Venezia"]
           ];
 
-          const TEAM_ALIAS = new Map();
-          for (const t of TARGET_TEAMS) TEAM_ALIAS.set(t.toLowerCase(), t);
-          for (const [from, to] of aliasPairs) TEAM_ALIAS.set(cleanName(from).toLowerCase(), to);
+          const TEAM_ALIAS=new Map();
 
-          const normTeam = s => {
-            const n = cleanName(s);
-            if (!n) return '';
+          for(const t of TARGET_TEAMS){
+            TEAM_ALIAS.set(t.toLowerCase(),t);
+          }
+
+          for(const [from,to] of aliasPairs){
+            TEAM_ALIAS.set(cleanName(from).toLowerCase(),to);
+          }
+
+          const normTeam=s=>{
+            const n=cleanName(s);
+            if(!n) return '';
             return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
-          const fmtLocal=new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ});
-          console.log('⏱️ Local:', fmtLocal.format(new Date()), '| UTC:', new Date().toISOString());
+          const fmtLocal=new Intl.DateTimeFormat('it-IT',{
+            dateStyle:'full',
+            timeStyle:'long',
+            timeZone:TZ
+          });
 
-          const ORDER = (String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc') ? 'desc' : 'asc';
+          console.log('⏱️ Local:',fmtLocal.format(new Date()),'| UTC:',new Date().toISOString());
+
+          const ORDER=(String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc') ? 'desc' : 'asc';
 
           const cmpUpcoming=(a,b)=>{
-            const ta=Date.parse(a.start||''); const tb=Date.parse(b.start||'');
-            if (ta!==tb) return ta - tb;
-            const ah=(a.home||'').toLowerCase(), aw=(a.away||'').toLowerCase();
-            const bh=(b.home||'').toLowerCase(), bw=(b.away||'').toLowerCase();
+            const ta=Date.parse(a.start||'');
+            const tb=Date.parse(b.start||'');
+
+            if(ta!==tb) return ta-tb;
+
+            const ah=(a.home||'').toLowerCase();
+            const aw=(a.away||'').toLowerCase();
+            const bh=(b.home||'').toLowerCase();
+            const bw=(b.away||'').toLowerCase();
+
             return (ah+aw).localeCompare(bh+bw);
           };
 
@@ -109,12 +254,17 @@
 
           async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
             for(let i=0;;i++){
-              const r=await fetch(u,opt).catch(e=>{ throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`); });
+              const r=await fetch(u,opt).catch(e=>{
+                throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`);
+              });
+
               if(r.ok) return r;
+
               if(![429,500,502,503,504].includes(r.status) || i>=tries-1){
                 const t=await r.text().catch(()=> '');
                 throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`);
               }
+
               await sleep(Math.round(base*Math.pow(2,i)));
             }
           }
@@ -125,20 +275,44 @@
           }
 
           async function gh(u,opt={}){
-            return fetchRetry(u,{...opt,headers:{...HEAD_GH,...(opt.headers||{})}});
+            return fetchRetry(u,{
+              ...opt,
+              headers:{
+                ...HEAD_GH,
+                ...(opt.headers||{})
+              }
+            });
           }
 
           async function readCurrent(){
             const r=await gh(`https://api.github.com/gists/${process.env.GIST_ID}`);
             const j=await r.json();
             const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
-            try{ return f&&f.content?JSON.parse(f.content):{}; }catch{ return {}; }
+
+            try{
+              return f && f.content ? JSON.parse(f.content) : {};
+            }catch{
+              return {};
+            }
           }
 
           async function writeGist(payload){
-            const body={files:{[process.env.GIST_FILE||'Classifica.json']:{content:JSON.stringify(payload,null,2)}}};
+            const body={
+              files:{
+                [process.env.GIST_FILE||'Classifica.json']:{
+                  content:JSON.stringify(payload,null,2)
+                }
+              }
+            };
+
             const url=`https://api.github.com/gists/${process.env.GIST_ID}`;
-            const r=await gh(url,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+
+            const r=await gh(url,{
+              method:'PATCH',
+              headers:{'content-type':'application/json'},
+              body:JSON.stringify(body)
+            });
+
             if(!r.ok){
               const txt=await r.text().catch(()=> '');
               throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`);
@@ -146,85 +320,96 @@
           }
 
           const rank=s=>s==='in'?3:s==='post'?2:s==='pre'?1:0;
-          const asNum=v => Number.isFinite(Number(v)) ? Number(v) : 0;
+          const asNum=v=>Number.isFinite(Number(v)) ? Number(v) : 0;
 
           async function fetchStandings(){
             const j=await httpFD(`${FD}/competitions/${COMP}/standings`);
-            const t=j.standings?.find(s=>/TOTAL/i.test(s.type))?.table||[];
+            const t=j.standings?.find(s=>/TOTAL/i.test(s.type))?.table || [];
 
             const rows=[];
             const seen=new Set();
 
             for(const r of t){
-              const team = normTeam(r.team?.shortName || r.team?.name || r.team?.tla);
+              const team=normTeam(r.team?.shortName || r.team?.name || r.team?.tla);
+
               if(!TARGET_SET.has(team)) continue;
               if(seen.has(team)) continue;
 
               seen.add(team);
+
               rows.push({
                 team,
-                played: asNum(r.playedGames),
-                points: asNum(r.points)
+                played:asNum(r.playedGames),
+                points:asNum(r.points)
               });
             }
 
-            // Se football-data non restituisce una squadra, la teniamo comunque a zero.
             for(const team of TARGET_TEAMS){
               if(!seen.has(team)){
                 rows.push({
                   team,
-                  played: 0,
-                  points: 0
+                  played:0,
+                  points:0
                 });
               }
             }
 
-            const played = rows.map(r=>r.played);
-            const giornata = Math.max(0, ...played);
+            const played=rows.map(r=>r.played);
+            const giornata=Math.max(0,...played);
 
             return {
               giornata,
-              teams: rows.map(r=>r.team),
-              pos_real: rows.map((_,i)=>i+1),
+              teams:rows.map(r=>r.team),
+              pos_real:rows.map((_,i)=>i+1),
               played,
-              points: rows.map(r=>r.points)
+              points:rows.map(r=>r.points)
             };
           }
 
           async function fetchMatches3Days(){
-            const now=new Date(), cutoff=new Date(now.getTime()-72*60*60*1000);
+            const now=new Date();
+            const cutoff=new Date(now.getTime()-72*60*60*1000);
+
             const pad=v=>String(v).padStart(2,'0');
             const dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
 
             const j=await httpFD(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`);
 
-            const rows=(j.matches||[]).map(m=>({
-              home:normTeam(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
-              away:normTeam(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
-              sh:m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null,
-              sa:m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null,
-              status:/FINISHED|IN_PLAY|PAUSED/.test(m.status)?(m.status==='FINISHED'?'post':'in'):'pre',
-              start:m.utcDate||null
-            }))
-            .filter(r=>TARGET_SET.has(r.home) && TARGET_SET.has(r.away));
+            const rows=(j.matches||[])
+              .map(m=>({
+                home:normTeam(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
+                away:normTeam(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
+                sh:m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null,
+                sa:m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null,
+                status:/FINISHED|IN_PLAY|PAUSED/.test(m.status) ? (m.status==='FINISHED' ? 'post' : 'in') : 'pre',
+                start:m.utcDate||null
+              }))
+              .filter(r=>TARGET_SET.has(r.home) && TARGET_SET.has(r.away));
 
             const latest=new Map();
 
             for(const r of rows){
               const k=`${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
               const p=latest.get(k);
-              if(!p || rank(r.status)>rank(p.status)) latest.set(k,r);
+
+              if(!p || rank(r.status)>rank(p.status)){
+                latest.set(k,r);
+              }
             }
 
-            return Array.from(latest.values()).filter(r=>{
-              if(!r.start) return false;
-              const dt=new Date(r.start);
-              return dt>=cutoff && dt<=now;
-            }).sort((a,b)=>String(a.start).localeCompare(String(b.start)));
+            return Array.from(latest.values())
+              .filter(r=>{
+                if(!r.start) return false;
+                const dt=new Date(r.start);
+                return dt>=cutoff && dt<=now;
+              })
+              .sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
           async function fetchUpcomingNext5Days(){
-            const now=new Date(), end=new Date(now.getTime()+5*24*60*60*1000);
+            const now=new Date();
+            const end=new Date(now.getTime()+5*24*60*60*1000);
+
             const pad=v=>String(v).padStart(2,'0');
             const dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
 
@@ -249,15 +434,18 @@
               .filter(r=>TARGET_SET.has(r.home) && TARGET_SET.has(r.away))
               .filter(r=>{
                 const t=Date.parse(r.start||'');
-                return Number.isFinite(t)&&t>=now.getTime()&&t<=end.getTime();
+                return Number.isFinite(t) && t>=now.getTime() && t<=end.getTime();
               })
               .sort(cmpUpcoming);
 
             if(ORDER==='desc') rows=rows.reverse();
 
-            const seen=new Set(), out=[];
+            const seen=new Set();
+            const out=[];
+
             for(const r of rows){
               const k=`${r.home}|${r.away}|${r.start||""}`;
+
               if(!seen.has(k)){
                 seen.add(k);
                 out.push(r);
@@ -267,6 +455,17 @@
             return out;
           }
 
+          function isZeroStartCurrent(current){
+            const g=asNum(current.giornata);
+            const played=Array.isArray(current.played) ? current.played.map(asNum) : [];
+            const points=Array.isArray(current.points) ? current.points.map(asNum) : [];
+
+            const allPlayedZero=played.length && played.every(v=>v===0);
+            const allPointsZero=points.length && points.every(v=>v===0);
+
+            return g===0 && allPlayedZero && allPointsZero;
+          }
+
           (async()=>{
             const current=await readCurrent();
 
@@ -274,11 +473,23 @@
             const past72=await fetchMatches3Days();
             const next=await fetchUpcomingNext5Days();
 
+            /*
+              Protezione pre-campionato:
+              se il Gist è azzerato e football-data restituisce una stagione vecchia
+              con tante partite giocate, non sovrascriviamo Classifica.json.
+            */
+            if(isZeroStartCurrent(current) && st.giornata>5){
+              console.log(`🛑 Preseason guard attiva: Classifica.json resta azzerato. football-data giornata=${st.giornata}`);
+              return;
+            }
+
             const key=r=>`${r.home}|${r.away}|${r.start||""}`;
             const map=new Map();
 
-            for(const r of [...past72, ...next]){
-              if(r && r.home && r.away) map.set(key(r), r);
+            for(const r of [...past72,...next]){
+              if(r && r.home && r.away){
+                map.set(key(r),r);
+              }
             }
 
             const results_raw=[...map.values()];
@@ -287,34 +498,39 @@
             const payload={
               ...current,
 
-              giornata: st.giornata,
+              giornata:st.giornata,
 
-              teams: st.teams,
-              pos_real: st.pos_real,
-              played: st.played,
-              points: st.points,
+              teams:st.teams,
+              pos_real:st.pos_real,
+              played:st.played,
+              points:st.points,
 
               results_raw,
-              upcoming_raw: next,
+              upcoming_raw:next,
 
               counts:{
-                pre: results_raw.filter(r=>r.status==='pre').length,
-                in:  results_raw.filter(r=>r.status==='in').length,
+                pre:results_raw.filter(r=>r.status==='pre').length,
+                in:results_raw.filter(r=>r.status==='in').length,
                 post:results_raw.filter(r=>r.status==='post').length
               },
 
-              synced_at: now.toISOString(),
+              synced_at:now.toISOString(),
 
               _meta:{
-                timezone: TZ,
-                order_upcoming: ORDER,
-                now_local: new Intl.DateTimeFormat('sv-SE',{timeZone:TZ, hour12:false, dateStyle:'short', timeStyle:'medium'}).format(now),
-                now_utc: now.toISOString(),
-                run_id: process.env.GITHUB_RUN_ID || null,
-                run_attempt: process.env.GITHUB_RUN_ATTEMPT || null,
-                repo: process.env.GITHUB_REPOSITORY || null,
-                workflow: process.env.GITHUB_WORKFLOW || null,
-                sha: process.env.GITHUB_SHA || null
+                timezone:TZ,
+                order_upcoming:ORDER,
+                now_local:new Intl.DateTimeFormat('sv-SE',{
+                  timeZone:TZ,
+                  hour12:false,
+                  dateStyle:'short',
+                  timeStyle:'medium'
+                }).format(now),
+                now_utc:now.toISOString(),
+                run_id:process.env.GITHUB_RUN_ID || null,
+                run_attempt:process.env.GITHUB_RUN_ATTEMPT || null,
+                repo:process.env.GITHUB_REPOSITORY || null,
+                workflow:process.env.GITHUB_WORKFLOW || null,
+                sha:process.env.GITHUB_SHA || null
               },
 
               _sources:{
@@ -330,7 +546,7 @@
 
             console.log(`✅ Gist aggiornato | giornata=${payload.giornata} | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{
-            console.error('❌ FATAL:', e.stack||e.message||String(e));
+            console.error('❌ FATAL:', e.stack || e.message || String(e));
             process.exit(1);
           });
           NODE
