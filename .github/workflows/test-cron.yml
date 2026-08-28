@@ -1,0 +1,30 @@
+name: TEST Cron ogni 5 minuti
+
+on:
+  schedule:
+    - cron: "3-58/5 * * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Test scheduler GitHub
+        run: |
+          echo "================================"
+          echo "TEST CRON GITHUB ACTIONS"
+          echo "================================"
+          echo "Evento: ${{ github.event_name }}"
+          echo "Cron: ${{ github.event.schedule }}"
+          echo "UTC:"
+          date -u
+          echo "Ora Italia:"
+          TZ=Europe/Rome date
+          echo "================================"
+          echo "✅ Workflow eseguito correttamente"
