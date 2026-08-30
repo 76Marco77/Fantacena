@@ -1,4 +1,4 @@
-name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
+name: Update Gist (Serie A) — stable monotonic results + fixtures
 
 on:
   workflow_dispatch:
@@ -29,24 +29,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Diagnose trigger and schedule
-        run: |
-          echo "========================================"
-          echo "GITHUB ACTIONS TRIGGER DIAGNOSTICS"
-          echo "========================================"
-          echo "Event: ${{ github.event_name }}"
-          echo "Schedule: ${{ github.event.schedule }}"
-          echo "Run ID: ${{ github.run_id }}"
-          echo "Run attempt: ${{ github.run_attempt }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Workflow: ${{ github.workflow }}"
-          echo "Branch/ref: ${{ github.ref }}"
-          echo "UTC reale:"
-          date -u
-          echo "Ora Europe/Rome:"
-          TZ=Europe/Rome date
-          echo "========================================"
-
       - name: Check secrets
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
@@ -60,148 +42,13 @@ jobs:
           echo "::add-mask::$FD_TOKEN"
           echo "✅ Secrets OK"
 
-      - name: Diagnose tokens and endpoints
-        env:
-          GIST_ID: ${{ secrets.GIST_ID }}
-          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
-          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
-        run: |
-          node - <<'NODE'
-          const TZ='Europe/Rome';
-          const now=new Date();
-
-          console.log(
-            '⏱️ Local:',
-            new Intl.DateTimeFormat('it-IT',{
-              dateStyle:'full',
-              timeStyle:'long',
-              timeZone:TZ
-            }).format(now),
-            '| UTC:',
-            now.toISOString()
-          );
-
-          const GIST_ID=process.env.GIST_ID;
-          const GH=`https://api.github.com/gists/${GIST_ID}`;
-
-          const HEAD_GH={
-            'authorization':`token ${process.env.GIST_TOKEN}`,
-            'accept':'application/vnd.github+json',
-            'user-agent':'seriea-diag'
-          };
-
-          const HEAD_FD={
-            'X-Auth-Token':process.env.FD_TOKEN,
-            'Accept':'application/json',
-            'User-Agent':'fd-diag'
-          };
-
-          async function probe(url,opt){
-            const r=await fetch(url,opt).catch(e=>({
-              ok:false,
-              status:0,
-              text:async()=>String(e)
-            }));
-
-            const t=await r.text();
-
-            console.log(`→ ${opt?.method||'GET'} ${url} :: ${r.status} ok=${r.ok}`);
-
-            if(!r.ok){
-              throw new Error(
-                `${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`
-              );
-            }
-          }
-
-          (async()=>{
-            await probe(GH,{headers:HEAD_GH});
-
-            await probe(
-              'https://api.football-data.org/v4/competitions/SA',
-              {headers:HEAD_FD}
-            );
-          })().catch(e=>{
-            console.error('❌ DIAG:', e.message);
-            process.exit(1);
-          });
-          NODE
-
-      - name: DEBUG raw football-data matches
-        env:
-          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
-        run: |
-          node - <<'NODE'
-          const now=new Date();
-          const from=new Date(
-            now.getTime() - 48*60*60*1000
-          );
-
-          const pad=n=>
-            String(n).padStart(2,'0');
-
-          const dstr=d=>
-            `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
-
-          const url=
-            `https://api.football-data.org/v4/competitions/SA/matches?dateFrom=${dstr(from)}&dateTo=${dstr(now)}`;
-
-          (async()=>{
-
-            const r=await fetch(
-              url,
-              {
-                headers:{
-                  'X-Auth-Token':process.env.FD_TOKEN,
-                  'Accept':'application/json',
-                  'User-Agent':'fantacena-debug'
-                }
-              }
-            );
-
-            const text=await r.text();
-
-            if(!r.ok){
-              throw new Error(
-                `football-data HTTP ${r.status}: ${text.slice(0,500)}`
-              );
-            }
-
-            const j=JSON.parse(text);
-
-            console.log('========================================');
-            console.log('===== RAW FOOTBALL-DATA MATCHES ========');
-            console.log('URL:',url);
-            console.log('MATCHES:',(j.matches||[]).length);
-            console.log('========================================');
-
-            for(const m of (j.matches||[])){
-
-              console.log(
-                `${m.homeTeam?.name || '?'} - ${m.awayTeam?.name || '?'}`,
-                '| STATUS:',m.status,
-                '| DATA:',m.utcDate,
-                '| SCORE:',JSON.stringify(m.score)
-              );
-            }
-
-            console.log('========================================');
-            console.log('========== FINE RAW ====================');
-            console.log('========================================');
-
-          })().catch(e=>{
-            console.error('❌ DEBUG:',e.message);
-            process.exit(1);
-          });
-          NODE
-
       - name: Build and push Gist Serie A Fantacena 2027
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
           GIST_FILE: Classifica.json
-          UPCOMING_ORDER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
+          UPCOMING_ORDER: ${{ github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -212,6 +59,7 @@ jobs:
           const FD='https://api.football-data.org/v4';
           const COMP='SA';
           const TZ='Europe/Rome';
+          const MAX_SINGLE_MATCH_CHECKS=4;
 
           const HEAD_FD={
             'X-Auth-Token':process.env.FD_TOKEN,
@@ -222,30 +70,13 @@ jobs:
           const HEAD_GH={
             'authorization':`token ${process.env.GIST_TOKEN}`,
             'accept':'application/vnd.github+json',
-            'user-agent':'seriea-fd-only'
+            'user-agent':'fantacena-gist-updater'
           };
 
           const TARGET_TEAMS=[
-            "Atalanta",
-            "Bologna",
-            "Cagliari",
-            "Como",
-            "Fiorentina",
-            "Frosinone",
-            "Genoa",
-            "Inter",
-            "Juventus",
-            "Lazio",
-            "Lecce",
-            "Milan",
-            "Monza",
-            "Napoli",
-            "Parma",
-            "Roma",
-            "Sassuolo",
-            "Torino",
-            "Udinese",
-            "Venezia"
+            'Atalanta','Bologna','Cagliari','Como','Fiorentina','Frosinone',
+            'Genoa','Inter','Juventus','Lazio','Lecce','Milan','Monza','Napoli',
+            'Parma','Roma','Sassuolo','Torino','Udinese','Venezia'
           ];
 
           const TARGET_SET=new Set(TARGET_TEAMS);
@@ -256,37 +87,37 @@ jobs:
             .trim();
 
           const aliasPairs=[
-            ["Atalanta BC","Atalanta"],
-            ["Bologna FC 1909","Bologna"],
-            ["Cagliari Calcio","Cagliari"],
-            ["Como 1907","Como"],
-            ["ACF Fiorentina","Fiorentina"],
-            ["Frosinone Calcio","Frosinone"],
-            ["Genoa CFC","Genoa"],
-            ["FC Internazionale Milano","Inter"],
-            ["Internazionale","Inter"],
-            ["Inter Milan","Inter"],
-            ["Juventus FC","Juventus"],
-            ["SS Lazio","Lazio"],
-            ["US Lecce","Lecce"],
-            ["AC Milan","Milan"],
-            ["AC Monza","Monza"],
-            ["SSC Napoli","Napoli"],
-            ["Parma Calcio 1913","Parma"],
-            ["AS Roma","Roma"],
-            ["US Sassuolo Calcio","Sassuolo"],
-            ["US Sassuolo","Sassuolo"],
-            ["Torino FC","Torino"],
-            ["Udinese Calcio","Udinese"],
-            ["Venezia FC","Venezia"],
+            ['Atalanta BC','Atalanta'],
+            ['Bologna FC 1909','Bologna'],
+            ['Cagliari Calcio','Cagliari'],
+            ['Como 1907','Como'],
+            ['ACF Fiorentina','Fiorentina'],
+            ['Frosinone Calcio','Frosinone'],
+            ['Genoa CFC','Genoa'],
+            ['FC Internazionale Milano','Inter'],
+            ['Internazionale','Inter'],
+            ['Inter Milan','Inter'],
+            ['Juventus FC','Juventus'],
+            ['SS Lazio','Lazio'],
+            ['US Lecce','Lecce'],
+            ['AC Milan','Milan'],
+            ['AC Monza','Monza'],
+            ['SSC Napoli','Napoli'],
+            ['Parma Calcio 1913','Parma'],
+            ['AS Roma','Roma'],
+            ['US Sassuolo Calcio','Sassuolo'],
+            ['US Sassuolo','Sassuolo'],
+            ['Torino FC','Torino'],
+            ['Udinese Calcio','Udinese'],
+            ['Venezia FC','Venezia'],
 
-            ["Cremonese","Frosinone"],
-            ["US Cremonese","Frosinone"],
-            ["Hellas Verona","Monza"],
-            ["Verona","Monza"],
-            ["AC Pisa","Venezia"],
-            ["Pisa","Venezia"],
-            ["Pisa SC","Venezia"]
+            ['Cremonese','Frosinone'],
+            ['US Cremonese','Frosinone'],
+            ['Hellas Verona','Monza'],
+            ['Verona','Monza'],
+            ['AC Pisa','Venezia'],
+            ['Pisa','Venezia'],
+            ['Pisa SC','Venezia']
           ];
 
           const TEAM_ALIAS=new Map();
@@ -310,47 +141,21 @@ jobs:
             return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
-          const fmtLocal=new Intl.DateTimeFormat('it-IT',{
-            dateStyle:'full',
-            timeStyle:'long',
-            timeZone:TZ
-          });
-
-          console.log(
-            '⏱️ Local:',
-            fmtLocal.format(new Date()),
-            '| UTC:',
-            new Date().toISOString()
-          );
-
-          const ORDER=(
+          const ORDER=
             String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc'
-          ) ? 'desc' : 'asc';
+              ? 'desc'
+              : 'asc';
 
-          const cmpUpcoming=(a,b)=>{
-            const ta=Date.parse(a.start||'');
-            const tb=Date.parse(b.start||'');
-
-            if(ta!==tb) return ta-tb;
-
-            const ah=(a.home||'').toLowerCase();
-            const aw=(a.away||'').toLowerCase();
-            const bh=(b.home||'').toLowerCase();
-            const bw=(b.away||'').toLowerCase();
-
-            return (ah+aw).localeCompare(bh+bw);
-          };
-
-          const sleep=ms=>new Promise(
-            r=>setTimeout(r,ms)
-          );
+          const sleep=ms=>
+            new Promise(r=>setTimeout(r,ms));
 
           async function fetchRetry(
             u,
             opt={},
-            {tries=5,base=400}={}
+            tries=4
           ){
-            for(let i=0;;i++){
+
+            for(let i=0;i<tries;i++){
 
               const r=await fetch(u,opt).catch(e=>{
                 throw new Error(
@@ -358,42 +163,53 @@ jobs:
                 );
               });
 
-              if(r.ok) return r;
+              if(r.ok){
+                return r;
+              }
+
+              const txt=
+                await r.text().catch(()=>'');
+
+              const retryable=
+                [429,500,502,503,504].includes(r.status);
 
               if(
-                ![429,500,502,503,504].includes(r.status)
+                !retryable
                 ||
-                i>=tries-1
+                i===tries-1
               ){
-                const t=await r.text().catch(()=>'');
-
                 throw new Error(
-                  `${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`
+                  `${opt.method||'GET'} ${r.status} ${u} :: ${txt.slice(0,300).replace(/\s+/g,' ')}`
                 );
               }
 
               await sleep(
-                Math.round(
-                  base*Math.pow(2,i)
-                )
+                450*Math.pow(2,i)
               );
             }
           }
 
           async function httpFD(u){
-            const r=await fetchRetry(
-              u,
-              {headers:HEAD_FD}
-            );
+
+            const r=
+              await fetchRetry(
+                u,
+                {headers:HEAD_FD}
+              );
 
             return r.json();
           }
 
-          async function gh(u,opt={}){
+          async function gh(
+            u,
+            opt={}
+          ){
+
             return fetchRetry(
               u,
               {
                 ...opt,
+
                 headers:{
                   ...HEAD_GH,
                   ...(opt.headers||{})
@@ -403,466 +219,349 @@ jobs:
           }
 
           async function readCurrent(){
-            const r=await gh(
-              `https://api.github.com/gists/${process.env.GIST_ID}`
-            );
 
-            const j=await r.json();
+            const r=
+              await gh(
+                `https://api.github.com/gists/${process.env.GIST_ID}`
+              );
 
-            const f=j.files?.[
-              process.env.GIST_FILE||'Classifica.json'
-            ];
+            const j=
+              await r.json();
+
+            const f=
+              j.files?.[
+                process.env.GIST_FILE
+                ||
+                'Classifica.json'
+              ];
 
             try{
-              return f && f.content
+
+              return f?.content
                 ? JSON.parse(f.content)
                 : {};
+
             }catch{
+
               return {};
             }
           }
 
           async function writeGist(payload){
+
             const body={
               files:{
                 [process.env.GIST_FILE||'Classifica.json']:{
-                  content:JSON.stringify(
-                    payload,
-                    null,
-                    2
-                  )
+                  content:
+                    JSON.stringify(
+                      payload,
+                      null,
+                      2
+                    )
                 }
               }
             };
 
-            const url=
-              `https://api.github.com/gists/${process.env.GIST_ID}`;
-
-            const r=await gh(
-              url,
+            await gh(
+              `https://api.github.com/gists/${process.env.GIST_ID}`,
               {
                 method:'PATCH',
+
                 headers:{
                   'content-type':'application/json'
                 },
-                body:JSON.stringify(body)
+
+                body:
+                  JSON.stringify(body)
               }
             );
-
-            if(!r.ok){
-              const txt=await r.text().catch(()=>'');
-
-              throw new Error(
-                `PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`
-              );
-            }
           }
 
-          const rank=s=>
-            s==='post'
-              ?3
-              :s==='in'
-                ?2
-                :s==='pre'
-                  ?1
-                  :0;
+          function canonicalStatus(s){
+
+            const st=
+              String(s||'')
+                .trim()
+                .toUpperCase()
+                .replace(/[-\s]+/g,'_');
+
+            if(
+              [
+                'FINISHED',
+                'AWARDED',
+                'POST',
+                'FT',
+                'FULL_TIME'
+              ].includes(st)
+            ){
+              return 'post';
+            }
+
+            if(
+              [
+                'LIVE',
+                'IN_PLAY',
+                'PAUSED',
+                'HALF_TIME',
+                'HT',
+                'EXTRA_TIME',
+                'PENALTY_SHOOTOUT',
+                '1H',
+                '2H',
+                'IN'
+              ].includes(st)
+            ){
+              return 'in';
+            }
+
+            if(
+              [
+                'SCHEDULED',
+                'TIMED',
+                'PRE'
+              ].includes(st)
+            ){
+              return 'pre';
+            }
+
+            return 'off';
+          }
+
+          function rank(s){
+
+            const st=
+              canonicalStatus(s);
+
+            if(st==='post'){
+              return 3;
+            }
+
+            if(st==='in'){
+              return 2;
+            }
+
+            if(st==='pre'){
+              return 1;
+            }
+
+            return 0;
+          }
 
           const asNum=v=>
             Number.isFinite(Number(v))
-              ?Number(v)
-              :0;
+              ? Number(v)
+              : 0;
 
-          async function fetchStandings(){
+          function normalizeProviderMatch(m){
 
-            const j=await httpFD(
-              `${FD}/competitions/${COMP}/standings`
-            );
-
-            const t=
-              j.standings
-                ?.find(s=>/TOTAL/i.test(s.type))
-                ?.table
-              || [];
-
-            const rows=[];
-            const seen=new Set();
-
-            for(const r of t){
-
-              const team=normTeam(
-                r.team?.shortName
+            const home=
+              normTeam(
+                m?.homeTeam?.shortName
                 ||
-                r.team?.name
+                m?.homeTeam?.name
                 ||
-                r.team?.tla
+                m?.homeTeam?.tla
+                ||
+                m?.home
               );
 
-              if(!TARGET_SET.has(team)) continue;
-              if(seen.has(team)) continue;
+            const away=
+              normTeam(
+                m?.awayTeam?.shortName
+                ||
+                m?.awayTeam?.name
+                ||
+                m?.awayTeam?.tla
+                ||
+                m?.away
+              );
 
-              seen.add(team);
+            const providerStatus=
+              String(
+                m?.status||''
+              ).toUpperCase();
 
-              rows.push({
-                team,
-                played:asNum(r.playedGames),
-                points:asNum(r.points)
-              });
-            }
-
-            for(const team of TARGET_TEAMS){
-
-              if(!seen.has(team)){
-                rows.push({
-                  team,
-                  played:0,
-                  points:0
-                });
-              }
-            }
-
-            const played=
-              rows.map(r=>r.played);
-
-            const giornata=
-              Math.max(0,...played);
+            const status=
+              canonicalStatus(
+                providerStatus
+              );
 
             return {
-              giornata,
-              teams:
-                rows.map(r=>r.team),
-              pos_real:
-                rows.map((_,i)=>i+1),
-              played,
-              points:
-                rows.map(r=>r.points)
+              id:
+                m?.id
+                ??
+                null,
+
+              home,
+
+              away,
+
+              sh:
+                m?.score?.fullTime?.home
+                ??
+                m?.score?.regularTime?.home
+                ??
+                m?.score?.halfTime?.home
+                ??
+                m?.sh
+                ??
+                null,
+
+              sa:
+                m?.score?.fullTime?.away
+                ??
+                m?.score?.regularTime?.away
+                ??
+                m?.score?.halfTime?.away
+                ??
+                m?.sa
+                ??
+                null,
+
+              status,
+
+              provider_status:
+                providerStatus
+                ||
+                null,
+
+              start:
+                m?.utcDate
+                ||
+                m?.start
+                ||
+                null,
+
+              matchday:
+                Number(m?.matchday)
+                ||
+                null,
+
+              provider_last_updated:
+                m?.lastUpdated
+                ||
+                null
             };
           }
 
-          async function fetchMatches3Days(){
+          function normalizeStoredMatch(m){
 
-            const now=new Date();
+            return {
+              ...m,
 
-            const cutoff=
-              new Date(
-                now.getTime()
-                -
-                72*60*60*1000
-              );
+              home:
+                normTeam(
+                  m?.home
+                ),
 
-            const pad=v=>
-              String(v).padStart(2,'0');
+              away:
+                normTeam(
+                  m?.away
+                ),
 
-            const dstr=d=>
-              `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+              status:
+                canonicalStatus(
+                  m?.status
+                ),
 
-            const j=await httpFD(
-              `${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`
-            );
-
-            const rows=
-              (j.matches||[])
-                .map(m=>({
-                  home:normTeam(
-                    m.homeTeam?.shortName
-                    ||
-                    m.homeTeam?.name
-                    ||
-                    m.homeTeam?.tla
-                  ),
-
-                  away:normTeam(
-                    m.awayTeam?.shortName
-                    ||
-                    m.awayTeam?.name
-                    ||
-                    m.awayTeam?.tla
-                  ),
-
-                  sh:
-                    m.score?.fullTime?.home
-                    ??
-                    m.score?.halfTime?.home
-                    ??
-                    null,
-
-                  sa:
-                    m.score?.fullTime?.away
-                    ??
-                    m.score?.halfTime?.away
-                    ??
-                    null,
-
-                  status:
-                    m.status==='FINISHED'
-                      ?'post'
-                      :(
-                        /IN_PLAY|PAUSED/.test(
-                          String(m.status||'')
-                        )
-                          ?'in'
-                          :'pre'
-                      ),
-
-                  start:
-                    m.utcDate||null
-                }))
-
-                .filter(
-                  r=>
-                    TARGET_SET.has(r.home)
-                    &&
-                    TARGET_SET.has(r.away)
-                );
-
-            const latest=new Map();
-
-            for(const r of rows){
-
-              const k=
-                `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
-
-              const p=
-                latest.get(k);
-
-              if(
-                !p
+              start:
+                m?.start
                 ||
-                rank(r.status)>rank(p.status)
-              ){
-                latest.set(k,r);
+                m?.utcDate
+                ||
+                null,
 
-              }else if(
-                p
-                &&
-                rank(r.status)===rank(p.status)
-              ){
+              sh:
+                m?.sh
+                ??
+                null,
 
-                const merged={
-                  ...p,
-                  ...r
-                };
-
-                if(
-                  p.sh!=null
-                  &&
-                  r.sh==null
-                ){
-                  merged.sh=p.sh;
-                }
-
-                if(
-                  p.sa!=null
-                  &&
-                  r.sa==null
-                ){
-                  merged.sa=p.sa;
-                }
-
-                latest.set(k,merged);
-              }
-            }
-
-            return Array.from(latest.values())
-              .filter(r=>{
-
-                if(!r.start) return false;
-
-                const dt=
-                  new Date(r.start);
-
-                return (
-                  dt>=cutoff
-                  &&
-                  dt<=now
-                );
-              })
-
-              .sort(
-                (a,b)=>
-                  String(a.start)
-                    .localeCompare(
-                      String(b.start)
-                    )
-              );
+              sa:
+                m?.sa
+                ??
+                null
+            };
           }
 
-          async function fetchUpcomingNext5Days(){
+          /*
+            NON usiamo l'orario nella chiave.
 
-            const now=new Date();
-
-            const end=
-              new Date(
-                now.getTime()
-                +
-                5*24*60*60*1000
-              );
-
-            const pad=v=>
-              String(v).padStart(2,'0');
-
-            const dstr=d=>
-              `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
-
-            let j=await httpFD(
-              `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${dstr(now)}&dateTo=${dstr(end)}`
-            );
-
-            if(!j.matches?.length){
-
-              j=await httpFD(
-                `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`
-              );
-            }
-
-            const BAD=
-              new Set([
-                'POSTPONED',
-                'CANCELED',
-                'SUSPENDED',
-                'AWARDED'
-              ]);
-
-            let rows=
-              (j.matches||[])
-
-                .filter(
-                  m=>
-                    !BAD.has(
-                      String(
-                        m.status||''
-                      ).toUpperCase()
-                    )
-                )
-
-                .map(m=>({
-                  home:normTeam(
-                    m.homeTeam?.shortName
-                    ||
-                    m.homeTeam?.name
-                    ||
-                    m.homeTeam?.tla
-                  ),
-
-                  away:normTeam(
-                    m.awayTeam?.shortName
-                    ||
-                    m.awayTeam?.name
-                    ||
-                    m.awayTeam?.tla
-                  ),
-
-                  sh:null,
-                  sa:null,
-                  status:'pre',
-                  start:m.utcDate||null
-                }))
-
-                .filter(
-                  r=>
-                    TARGET_SET.has(r.home)
-                    &&
-                    TARGET_SET.has(r.away)
-                )
-
-                .filter(r=>{
-
-                  const t=
-                    Date.parse(
-                      r.start||''
-                    );
-
-                  return (
-                    Number.isFinite(t)
-                    &&
-                    t>=now.getTime()
-                    &&
-                    t<=end.getTime()
-                  );
-                })
-
-                .sort(cmpUpcoming);
-
-            if(ORDER==='desc'){
-              rows=rows.reverse();
-            }
-
-            const seen=new Set();
-            const out=[];
-
-            for(const r of rows){
-
-              const k=
-                `${r.home}|${r.away}|${r.start||""}`;
-
-              if(!seen.has(k)){
-                seen.add(k);
-                out.push(r);
-              }
-            }
-
-            return out;
-          }
-
-          function isZeroStartCurrent(current){
-
-            const g=
-              asNum(current.giornata);
-
-            const played=
-              Array.isArray(current.played)
-                ?current.played.map(asNum)
-                :[];
-
-            const points=
-              Array.isArray(current.points)
-                ?current.points.map(asNum)
-                :[];
-
-            const allPlayedZero=
-              played.length
-              &&
-              played.every(v=>v===0);
-
-            const allPointsZero=
-              points.length
-              &&
-              points.every(v=>v===0);
+            Se football-data modifica il kickoff,
+            Juventus-Parma rimane la stessa partita
+            e non viene duplicata.
+          */
+          function matchKey(r){
 
             return (
-              g===0
-              &&
-              allPlayedZero
-              &&
-              allPointsZero
+              `${String(r?.home||'').toLowerCase()}`
+              +
+              '|'
+              +
+              `${String(r?.away||'').toLowerCase()}`
             );
           }
 
-          function matchKey(r){
-            return `${String(r&&r.home||'').toLowerCase()}|${String(r&&r.away||'').toLowerCase()}|${r&&r.start||''}`;
-          }
+          function mergeMatch(
+            existing,
+            incoming
+          ){
 
-          function mergeMatch(existing,incoming){
+            if(!existing){
+              return incoming;
+            }
 
-            if(!existing) return incoming;
-            if(!incoming) return existing;
-
-            const oldRank=
-              rank(existing.status);
-
-            const newRank=
-              rank(incoming.status);
-
-            if(newRank<oldRank){
+            if(!incoming){
               return existing;
             }
 
-            if(newRank>oldRank){
+            const oldStatus=
+              canonicalStatus(
+                existing.status
+              );
+
+            const newStatus=
+              canonicalStatus(
+                incoming.status
+              );
+
+            const oldRank=
+              rank(oldStatus);
+
+            const newRank=
+              rank(newStatus);
+
+            /*
+              REGOLA FONDAMENTALE:
+
+              PRE -> IN -> POST
+
+              MAI AL CONTRARIO.
+            */
+            if(
+              newRank
+              <
+              oldRank
+            ){
+              return existing;
+            }
+
+            if(
+              newRank
+              >
+              oldRank
+            ){
 
               const advanced={
                 ...existing,
-                ...incoming
+                ...incoming,
+                status:newStatus
               };
 
+              /*
+                Un aggiornamento di stato
+                senza punteggio non cancella
+                un punteggio già conosciuto.
+              */
               if(
                 incoming.sh==null
                 &&
@@ -884,33 +583,452 @@ jobs:
               return advanced;
             }
 
+            /*
+              STESSO STATO.
+
+              Accettiamo i nuovi dati,
+              ma un null non cancella
+              un valore già conosciuto.
+            */
             const merged={
               ...existing,
-              ...incoming
+              ...incoming,
+              status:newStatus
             };
 
             if(
-              existing.sh!=null
-              &&
               incoming.sh==null
+              &&
+              existing.sh!=null
             ){
               merged.sh=
                 existing.sh;
             }
 
             if(
-              existing.sa!=null
-              &&
               incoming.sa==null
+              &&
+              existing.sa!=null
             ){
               merged.sa=
                 existing.sa;
             }
 
+            if(
+              incoming.id==null
+              &&
+              existing.id!=null
+            ){
+              merged.id=
+                existing.id;
+            }
+
+            if(
+              !incoming.start
+              &&
+              existing.start
+            ){
+              merged.start=
+                existing.start;
+            }
+
             return merged;
           }
 
+          function putMatch(
+            map,
+            r
+          ){
+
+            if(
+              !r?.home
+              ||
+              !r?.away
+            ){
+              return;
+            }
+
+            if(
+              !TARGET_SET.has(r.home)
+              ||
+              !TARGET_SET.has(r.away)
+            ){
+              return;
+            }
+
+            const k=
+              matchKey(r);
+
+            map.set(
+              k,
+              mergeMatch(
+                map.get(k),
+                r
+              )
+            );
+          }
+
+          function pad(v){
+
+            return String(v)
+              .padStart(2,'0');
+          }
+
+          function dstr(d){
+
+            return (
+              `${d.getUTCFullYear()}`
+              +
+              '-'
+              +
+              `${pad(d.getUTCMonth()+1)}`
+              +
+              '-'
+              +
+              `${pad(d.getUTCDate())}`
+            );
+          }
+
+          async function fetchStandings(){
+
+            const j=
+              await httpFD(
+                `${FD}/competitions/${COMP}/standings`
+              );
+
+            const t=
+              j.standings
+                ?.find(
+                  s=>/TOTAL/i.test(s.type)
+                )
+                ?.table
+              ||
+              [];
+
+            const rows=[];
+            const seen=new Set();
+
+            for(const r of t){
+
+              const team=
+                normTeam(
+                  r.team?.shortName
+                  ||
+                  r.team?.name
+                  ||
+                  r.team?.tla
+                );
+
+              if(
+                !TARGET_SET.has(team)
+                ||
+                seen.has(team)
+              ){
+                continue;
+              }
+
+              seen.add(team);
+
+              rows.push({
+                team,
+                played:
+                  asNum(
+                    r.playedGames
+                  ),
+                points:
+                  asNum(
+                    r.points
+                  )
+              });
+            }
+
+            for(
+              const team
+              of
+              TARGET_TEAMS
+            ){
+
+              if(
+                !seen.has(team)
+              ){
+
+                rows.push({
+                  team,
+                  played:0,
+                  points:0
+                });
+              }
+            }
+
+            const played=
+              rows.map(
+                r=>r.played
+              );
+
+            const playedMax=
+              Math.max(
+                0,
+                ...played
+              );
+
+            const providerMatchday=
+              Number(
+                j?.season?.currentMatchday
+              )
+              ||
+              0;
+
+            return {
+              giornata:
+                playedMax,
+
+              providerMatchday:
+                Math.max(
+                  providerMatchday,
+                  playedMax
+                ),
+
+              teams:
+                rows.map(
+                  r=>r.team
+                ),
+
+              pos_real:
+                rows.map(
+                  (_,i)=>i+1
+                ),
+
+              played,
+
+              points:
+                rows.map(
+                  r=>r.points
+                )
+            };
+          }
+
+          async function fetchWindowMatches(
+            now
+          ){
+
+            const from=
+              new Date(
+                now.getTime()
+                -
+                96*60*60*1000
+              );
+
+            const to=
+              new Date(
+                now.getTime()
+                +
+                5*24*60*60*1000
+              );
+
+            const j=
+              await httpFD(
+                `${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(to)}`
+              );
+
+            return (
+              j.matches
+              ||
+              []
+            )
+              .map(
+                normalizeProviderMatch
+              )
+              .filter(
+                r=>
+                  TARGET_SET.has(r.home)
+                  &&
+                  TARGET_SET.has(r.away)
+              );
+          }
+
+          async function fetchMatchdayMatches(
+            matchday
+          ){
+
+            if(
+              !Number.isFinite(
+                Number(matchday)
+              )
+              ||
+              Number(matchday)<=0
+            ){
+              return [];
+            }
+
+            const j=
+              await httpFD(
+                `${FD}/competitions/${COMP}/matches?matchday=${Number(matchday)}`
+              );
+
+            return (
+              j.matches
+              ||
+              []
+            )
+              .map(
+                normalizeProviderMatch
+              )
+              .filter(
+                r=>
+                  TARGET_SET.has(r.home)
+                  &&
+                  TARGET_SET.has(r.away)
+              );
+          }
+
+          async function verifySuspiciousMatches(
+            map,
+            now
+          ){
+
+            const candidates=
+              [...map.values()]
+
+                .filter(r=>{
+
+                  if(
+                    !r?.id
+                    ||
+                    !r?.start
+                  ){
+                    return false;
+                  }
+
+                  const t=
+                    Date.parse(
+                      r.start
+                    );
+
+                  if(
+                    !Number.isFinite(t)
+                  ){
+                    return false;
+                  }
+
+                  const st=
+                    canonicalStatus(
+                      r.status
+                    );
+
+                  /*
+                    Ricontrolla:
+
+                    - match già LIVE;
+                    - match PRE con kickoff passato.
+                  */
+                  return (
+                    st==='in'
+                    ||
+                    (
+                      st==='pre'
+                      &&
+                      t<=now.getTime()
+                    )
+                  );
+                })
+
+                .sort(
+                  (a,b)=>
+                    Date.parse(b.start||0)
+                    -
+                    Date.parse(a.start||0)
+                )
+
+                .slice(
+                  0,
+                  MAX_SINGLE_MATCH_CHECKS
+                );
+
+            for(
+              const r
+              of
+              candidates
+            ){
+
+              try{
+
+                const raw=
+                  await httpFD(
+                    `${FD}/matches/${r.id}`
+                  );
+
+                const fresh=
+                  normalizeProviderMatch(
+                    raw
+                  );
+
+                putMatch(
+                  map,
+                  fresh
+                );
+
+                console.log(
+                  `🔎 Match ${r.id}: ${fresh.home}-${fresh.away} | ${fresh.provider_status} | ${fresh.sh ?? '-'}-${fresh.sa ?? '-'}`
+                );
+
+              }catch(e){
+
+                console.warn(
+                  `⚠️ Verifica singola match ${r.id} fallita:`,
+                  e.message
+                );
+              }
+            }
+          }
+
+          function isZeroStartCurrent(
+            current
+          ){
+
+            const g=
+              asNum(
+                current.giornata
+              );
+
+            const played=
+              Array.isArray(
+                current.played
+              )
+                ?
+                  current.played.map(asNum)
+                :
+                  [];
+
+            const points=
+              Array.isArray(
+                current.points
+              )
+                ?
+                  current.points.map(asNum)
+                :
+                  [];
+
+            return (
+              g===0
+              &&
+              played.length>0
+              &&
+              points.length>0
+              &&
+              played.every(
+                v=>v===0
+              )
+              &&
+              points.every(
+                v=>v===0
+              )
+            );
+          }
+
           (async()=>{
+
+            const now=
+              new Date();
 
             const current=
               await readCurrent();
@@ -918,12 +1036,30 @@ jobs:
             const st=
               await fetchStandings();
 
-            const past72=
-              await fetchMatches3Days();
+            /*
+              Leggiamo la stessa competizione
+              in due modi diversi:
 
-            const next=
-              await fetchUpcomingNext5Days();
+              1. finestra temporale;
+              2. giornata corrente.
 
+              Se una delle due risposte è più avanzata,
+              viene mantenuta quella migliore.
+            */
+            const [
+              windowMatches,
+              matchdayMatches
+            ]=
+              await Promise.all([
+                fetchWindowMatches(now),
+                fetchMatchdayMatches(
+                  st.providerMatchday
+                )
+              ]);
+
+            /*
+              Protezione pre-campionato.
+            */
             if(
               isZeroStartCurrent(current)
               &&
@@ -937,104 +1073,105 @@ jobs:
               return;
             }
 
-            const now=
-              new Date();
-
             const map=
               new Map();
 
             /*
-              Dal vecchio Gist manteniamo SOLO
-              le partite già definitivamente finite.
+              MEMORIA DEL GIST.
+
+              Stavolta conserviamo PRE, IN e POST.
+
+              Questo è fondamentale:
+              se Juventus-Parma era già IN,
+              una risposta successiva TIMED
+              NON la può riportare PRE.
+
+              Se era POST,
+              non può tornare IN o PRE.
             */
-            const previousMatches=[
-              ...(Array.isArray(current.results_raw)
-                ?current.results_raw
-                :[]),
-              ...(Array.isArray(current.upcoming_raw)
-                ?current.upcoming_raw
-                :[])
+            const previous=[
+              ...(
+                Array.isArray(
+                  current.results_raw
+                )
+                  ?
+                    current.results_raw
+                  :
+                    []
+              ),
+
+              ...(
+                Array.isArray(
+                  current.upcoming_raw
+                )
+                  ?
+                    current.upcoming_raw
+                  :
+                    []
+              )
             ];
 
-            for(const r of previousMatches){
+            for(
+              const raw
+              of
+              previous
+            ){
 
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-                ||
-                r.status!=='post'
-              ){
-                continue;
-              }
+              const r=
+                normalizeStoredMatch(
+                  raw
+                );
 
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
+              putMatch(
+                map,
+                r
               );
             }
 
             /*
-              Dati freschi ultime 72 ore.
+              Aggiornamento dalla finestra.
             */
-            for(const r of past72){
+            for(
+              const r
+              of
+              windowMatches
+            ){
 
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-              ){
-                continue;
-              }
-
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
+              putMatch(
+                map,
+                r
               );
             }
 
             /*
-              Prossime partite.
+              Aggiornamento specifico giornata.
+
+              Se questo endpoint restituisce
+              uno stato più avanzato rispetto
+              al date-range, vince lui.
             */
-            for(const r of next){
+            for(
+              const r
+              of
+              matchdayMatches
+            ){
 
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-              ){
-                continue;
-              }
-
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
+              putMatch(
+                map,
+                r
               );
             }
+
+            /*
+              Controllo aggiuntivo del singolo match.
+
+              Utile proprio per casi come:
+              partita iniziata ma lista ancora TIMED.
+            */
+            await verifySuspiciousMatches(
+              map,
+              now
+            );
 
             const minKeep=
               now.getTime()
@@ -1053,7 +1190,7 @@ jobs:
 
                   const t=
                     Date.parse(
-                      r&&r.start||''
+                      r?.start||''
                     );
 
                   return (
@@ -1069,38 +1206,68 @@ jobs:
                   (a,b)=>
                     String(
                       a.start||''
-                    ).localeCompare(
-                      String(
-                        b.start||''
-                      )
                     )
+                      .localeCompare(
+                        String(
+                          b.start||''
+                        )
+                      )
                 );
 
-            const upcoming_raw=
+            let upcoming_raw=
               results_raw
 
                 .filter(r=>{
 
                   const t=
                     Date.parse(
-                      r&&r.start||''
+                      r?.start||''
                     );
 
                   return (
-                    r.status==='pre'
+                    canonicalStatus(
+                      r.status
+                    )==='pre'
                     &&
                     Number.isFinite(t)
                     &&
-                    t>=now.getTime()
+                    t>now.getTime()
                   );
                 })
 
                 .sort(
-                  cmpUpcoming
+                  (a,b)=>{
+
+                    const ta=
+                      Date.parse(
+                        a.start||''
+                      );
+
+                    const tb=
+                      Date.parse(
+                        b.start||''
+                      );
+
+                    if(
+                      ta!==tb
+                    ){
+                      return ta-tb;
+                    }
+
+                    return (
+                      `${a.home}${a.away}`
+                        .localeCompare(
+                          `${b.home}${b.away}`
+                        )
+                    );
+                  }
                 );
 
-            if(ORDER==='desc'){
-              upcoming_raw.reverse();
+            if(
+              ORDER==='desc'
+            ){
+              upcoming_raw=
+                upcoming_raw.reverse();
             }
 
             const payload={
@@ -1126,19 +1293,29 @@ jobs:
               upcoming_raw,
 
               counts:{
+
                 pre:
                   results_raw.filter(
-                    r=>r.status==='pre'
+                    r=>
+                      canonicalStatus(
+                        r.status
+                      )==='pre'
                   ).length,
 
                 in:
                   results_raw.filter(
-                    r=>r.status==='in'
+                    r=>
+                      canonicalStatus(
+                        r.status
+                      )==='in'
                   ).length,
 
                 post:
                   results_raw.filter(
-                    r=>r.status==='post'
+                    r=>
+                      canonicalStatus(
+                        r.status
+                      )==='post'
                   ).length
               },
 
@@ -1146,11 +1323,15 @@ jobs:
                 now.toISOString(),
 
               _meta:{
+
                 timezone:
                   TZ,
 
                 order_upcoming:
                   ORDER,
+
+                provider_matchday:
+                  st.providerMatchday,
 
                 now_local:
                   new Intl.DateTimeFormat(
@@ -1193,27 +1374,33 @@ jobs:
               },
 
               _sources:{
+
                 provider:
                   'football-data.org',
 
                 standings:
-                  'football-data_standings_normalized_fantacena_2027',
+                  'football-data_standings',
 
-                results:
-                  'football-data_matches_past72h_normalized_fantacena_2027',
+                matches_window:
+                  'football-data_matches_-96h_+5d',
 
-                upcoming:
-                  `football-data_matches_next_5d_${ORDER}_normalized_fantacena_2027`,
+                matches_matchday:
+                  'football-data_matches_current_matchday',
+
+                suspicious_match_check:
+                  'football-data_single_match_max_4',
 
                 scorers:
                   'manual'
               }
             };
 
-            await writeGist(payload);
+            await writeGist(
+              payload
+            );
 
             console.log(
-              `✅ Gist aggiornato | giornata=${payload.giornata} | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`
+              `✅ Gist aggiornato | giornata=${payload.giornata} | providerMatchday=${st.providerMatchday} | results=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`
             );
 
           })().catch(e=>{
