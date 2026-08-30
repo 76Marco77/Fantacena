@@ -127,6 +127,74 @@ jobs:
           });
           NODE
 
+      - name: DEBUG raw football-data matches
+        env:
+          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+        run: |
+          node - <<'NODE'
+          const now=new Date();
+          const from=new Date(
+            now.getTime() - 48*60*60*1000
+          );
+
+          const pad=n=>
+            String(n).padStart(2,'0');
+
+          const dstr=d=>
+            `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+
+          const url=
+            `https://api.football-data.org/v4/competitions/SA/matches?dateFrom=${dstr(from)}&dateTo=${dstr(now)}`;
+
+          (async()=>{
+
+            const r=await fetch(
+              url,
+              {
+                headers:{
+                  'X-Auth-Token':process.env.FD_TOKEN,
+                  'Accept':'application/json',
+                  'User-Agent':'fantacena-debug'
+                }
+              }
+            );
+
+            const text=await r.text();
+
+            if(!r.ok){
+              throw new Error(
+                `football-data HTTP ${r.status}: ${text.slice(0,500)}`
+              );
+            }
+
+            const j=JSON.parse(text);
+
+            console.log('========================================');
+            console.log('===== RAW FOOTBALL-DATA MATCHES ========');
+            console.log('URL:',url);
+            console.log('MATCHES:',(j.matches||[]).length);
+            console.log('========================================');
+
+            for(const m of (j.matches||[])){
+
+              console.log(
+                `${m.homeTeam?.name || '?'} - ${m.awayTeam?.name || '?'}`,
+                '| STATUS:',m.status,
+                '| DATA:',m.utcDate,
+                '| SCORE:',JSON.stringify(m.score)
+              );
+            }
+
+            console.log('========================================');
+            console.log('========== FINE RAW ====================');
+            console.log('========================================');
+
+          })().catch(e=>{
+            console.error('❌ DEBUG:',e.message);
+            process.exit(1);
+          });
+          NODE
+
       - name: Build and push Gist Serie A Fantacena 2027
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
@@ -236,7 +304,9 @@ jobs:
 
           const normTeam=s=>{
             const n=cleanName(s);
+
             if(!n) return '';
+
             return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
@@ -271,7 +341,9 @@ jobs:
             return (ah+aw).localeCompare(bh+bw);
           };
 
-          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const sleep=ms=>new Promise(
+            r=>setTimeout(r,ms)
+          );
 
           async function fetchRetry(
             u,
@@ -301,7 +373,9 @@ jobs:
               }
 
               await sleep(
-                Math.round(base*Math.pow(2,i))
+                Math.round(
+                  base*Math.pow(2,i)
+                )
               );
             }
           }
@@ -384,12 +458,6 @@ jobs:
             }
           }
 
-          /*
-            Ordine corretto degli stati:
-            post = FINITA
-            in   = IN CORSO
-            pre  = DA GIOCARE
-          */
           const rank=s=>
             s==='post'
               ?3
@@ -401,8 +469,8 @@ jobs:
 
           const asNum=v=>
             Number.isFinite(Number(v))
-              ? Number(v)
-              : 0;
+              ?Number(v)
+              :0;
 
           async function fetchStandings(){
 
@@ -452,16 +520,21 @@ jobs:
               }
             }
 
-            const played=rows.map(r=>r.played);
+            const played=
+              rows.map(r=>r.played);
 
-            const giornata=Math.max(0,...played);
+            const giornata=
+              Math.max(0,...played);
 
             return {
               giornata,
-              teams:rows.map(r=>r.team),
-              pos_real:rows.map((_,i)=>i+1),
+              teams:
+                rows.map(r=>r.team),
+              pos_real:
+                rows.map((_,i)=>i+1),
               played,
-              points:rows.map(r=>r.points)
+              points:
+                rows.map(r=>r.points)
             };
           }
 
@@ -476,7 +549,8 @@ jobs:
                 72*60*60*1000
               );
 
-            const pad=v=>String(v).padStart(2,'0');
+            const pad=v=>
+              String(v).padStart(2,'0');
 
             const dstr=d=>
               `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -522,7 +596,9 @@ jobs:
                     m.status==='FINISHED'
                       ?'post'
                       :(
-                        /IN_PLAY|PAUSED/.test(m.status)
+                        /IN_PLAY|PAUSED/.test(
+                          String(m.status||'')
+                        )
                           ?'in'
                           :'pre'
                       ),
@@ -545,7 +621,8 @@ jobs:
               const k=
                 `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
 
-              const p=latest.get(k);
+              const p=
+                latest.get(k);
 
               if(
                 !p
@@ -560,13 +637,24 @@ jobs:
                 rank(r.status)===rank(p.status)
               ){
 
-                const merged={...p,...r};
+                const merged={
+                  ...p,
+                  ...r
+                };
 
-                if(p.sh!=null && r.sh==null){
+                if(
+                  p.sh!=null
+                  &&
+                  r.sh==null
+                ){
                   merged.sh=p.sh;
                 }
 
-                if(p.sa!=null && r.sa==null){
+                if(
+                  p.sa!=null
+                  &&
+                  r.sa==null
+                ){
                   merged.sa=p.sa;
                 }
 
@@ -579,7 +667,8 @@ jobs:
 
                 if(!r.start) return false;
 
-                const dt=new Date(r.start);
+                const dt=
+                  new Date(r.start);
 
                 return (
                   dt>=cutoff
@@ -608,7 +697,8 @@ jobs:
                 5*24*60*60*1000
               );
 
-            const pad=v=>String(v).padStart(2,'0');
+            const pad=v=>
+              String(v).padStart(2,'0');
 
             const dstr=d=>
               `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -622,7 +712,6 @@ jobs:
               j=await httpFD(
                 `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`
               );
-
             }
 
             const BAD=
@@ -639,7 +728,9 @@ jobs:
                 .filter(
                   m=>
                     !BAD.has(
-                      String(m.status||'').toUpperCase()
+                      String(
+                        m.status||''
+                      ).toUpperCase()
                     )
                 )
 
@@ -675,7 +766,10 @@ jobs:
 
                 .filter(r=>{
 
-                  const t=Date.parse(r.start||'');
+                  const t=
+                    Date.parse(
+                      r.start||''
+                    );
 
                   return (
                     Number.isFinite(t)
@@ -711,7 +805,8 @@ jobs:
 
           function isZeroStartCurrent(current){
 
-            const g=asNum(current.giornata);
+            const g=
+              asNum(current.giornata);
 
             const played=
               Array.isArray(current.played)
@@ -751,14 +846,12 @@ jobs:
             if(!existing) return incoming;
             if(!incoming) return existing;
 
-            const oldRank=rank(existing.status);
-            const newRank=rank(incoming.status);
+            const oldRank=
+              rank(existing.status);
 
-            /*
-              Non permettere regressioni:
-              post non torna in/pre
-              in non torna pre
-            */
+            const newRank=
+              rank(incoming.status);
+
             if(newRank<oldRank){
               return existing;
             }
@@ -775,7 +868,8 @@ jobs:
                 &&
                 existing.sh!=null
               ){
-                advanced.sh=existing.sh;
+                advanced.sh=
+                  existing.sh;
               }
 
               if(
@@ -783,17 +877,13 @@ jobs:
                 &&
                 existing.sa!=null
               ){
-                advanced.sa=existing.sa;
+                advanced.sa=
+                  existing.sa;
               }
 
               return advanced;
             }
 
-            /*
-              Stesso stato:
-              usa i nuovi dati ma non cancella
-              un punteggio già conosciuto.
-            */
             const merged={
               ...existing,
               ...incoming
@@ -804,7 +894,8 @@ jobs:
               &&
               incoming.sh==null
             ){
-              merged.sh=existing.sh;
+              merged.sh=
+                existing.sh;
             }
 
             if(
@@ -812,7 +903,8 @@ jobs:
               &&
               incoming.sa==null
             ){
-              merged.sa=existing.sa;
+              merged.sa=
+                existing.sa;
             }
 
             return merged;
@@ -832,9 +924,6 @@ jobs:
             const next=
               await fetchUpcomingNext5Days();
 
-            /*
-              Protezione pre-campionato.
-            */
             if(
               isZeroStartCurrent(current)
               &&
@@ -848,17 +937,15 @@ jobs:
               return;
             }
 
-            const now=new Date();
+            const now=
+              new Date();
 
-            const map=new Map();
+            const map=
+              new Map();
 
             /*
-              IMPORTANTE:
-              dal vecchio Gist manteniamo SOLO
-              partite già definitivamente FINITE.
-
-              Non conserviamo vecchi stati pre/in,
-              perché potrebbero essere ormai obsoleti.
+              Dal vecchio Gist manteniamo SOLO
+              le partite già definitivamente finite.
             */
             const previousMatches=[
               ...(Array.isArray(current.results_raw)
@@ -883,7 +970,8 @@ jobs:
                 continue;
               }
 
-              const k=matchKey(r);
+              const k=
+                matchKey(r);
 
               map.set(
                 k,
@@ -895,7 +983,7 @@ jobs:
             }
 
             /*
-              Inserisce i dati freschi delle ultime 72 ore.
+              Dati freschi ultime 72 ore.
             */
             for(const r of past72){
 
@@ -909,7 +997,8 @@ jobs:
                 continue;
               }
 
-              const k=matchKey(r);
+              const k=
+                matchKey(r);
 
               map.set(
                 k,
@@ -921,9 +1010,7 @@ jobs:
             }
 
             /*
-              Inserisce le prossime partite.
-              Non può sovrascrivere una partita
-              già live o finita con pre.
+              Prossime partite.
             */
             for(const r of next){
 
@@ -937,7 +1024,8 @@ jobs:
                 continue;
               }
 
-              const k=matchKey(r);
+              const k=
+                matchKey(r);
 
               map.set(
                 k,
@@ -979,10 +1067,13 @@ jobs:
 
                 .sort(
                   (a,b)=>
-                    String(a.start||'')
-                      .localeCompare(
-                        String(b.start||'')
+                    String(
+                      a.start||''
+                    ).localeCompare(
+                      String(
+                        b.start||''
                       )
+                    )
                 );
 
             const upcoming_raw=
@@ -1004,7 +1095,9 @@ jobs:
                   );
                 })
 
-                .sort(cmpUpcoming);
+                .sort(
+                  cmpUpcoming
+                );
 
             if(ORDER==='desc'){
               upcoming_raw.reverse();
