@@ -236,9 +236,7 @@ jobs:
 
           const normTeam=s=>{
             const n=cleanName(s);
-
             if(!n) return '';
-
             return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
@@ -273,9 +271,7 @@ jobs:
             return (ah+aw).localeCompare(bh+bw);
           };
 
-          const sleep=ms=>new Promise(
-            r=>setTimeout(r,ms)
-          );
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
           async function fetchRetry(
             u,
@@ -297,7 +293,7 @@ jobs:
                 ||
                 i>=tries-1
               ){
-                const t=await r.text().catch(()=> '');
+                const t=await r.text().catch(()=>'');
 
                 throw new Error(
                   `${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`
@@ -305,9 +301,7 @@ jobs:
               }
 
               await sleep(
-                Math.round(
-                  base*Math.pow(2,i)
-                )
+                Math.round(base*Math.pow(2,i))
               );
             }
           }
@@ -382,7 +376,7 @@ jobs:
             );
 
             if(!r.ok){
-              const txt=await r.text().catch(()=> '');
+              const txt=await r.text().catch(()=>'');
 
               throw new Error(
                 `PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`
@@ -390,8 +384,12 @@ jobs:
             }
           }
 
-          // Stato partita: FINITA > IN CORSO > DA GIOCARE.
-          // Una partita non deve mai tornare indietro di stato.
+          /*
+            Ordine corretto degli stati:
+            post = FINITA
+            in   = IN CORSO
+            pre  = DA GIOCARE
+          */
           const rank=s=>
             s==='post'
               ?3
@@ -446,31 +444,24 @@ jobs:
             for(const team of TARGET_TEAMS){
 
               if(!seen.has(team)){
-
                 rows.push({
                   team,
                   played:0,
                   points:0
                 });
-
               }
             }
 
-            const played=
-              rows.map(r=>r.played);
+            const played=rows.map(r=>r.played);
 
-            const giornata=
-              Math.max(0,...played);
+            const giornata=Math.max(0,...played);
 
             return {
               giornata,
-              teams:
-                rows.map(r=>r.team),
-              pos_real:
-                rows.map((_,i)=>i+1),
+              teams:rows.map(r=>r.team),
+              pos_real:rows.map((_,i)=>i+1),
               played,
-              points:
-                rows.map(r=>r.points)
+              points:rows.map(r=>r.points)
             };
           }
 
@@ -485,8 +476,7 @@ jobs:
                 72*60*60*1000
               );
 
-            const pad=v=>
-              String(v).padStart(2,'0');
+            const pad=v=>String(v).padStart(2,'0');
 
             const dstr=d=>
               `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -529,15 +519,13 @@ jobs:
                     null,
 
                   status:
-                    /FINISHED|IN_PLAY|PAUSED/.test(m.status)
-                      ?
-                        (
-                          m.status==='FINISHED'
-                            ? 'post'
-                            : 'in'
-                        )
-                      :
-                        'pre',
+                    m.status==='FINISHED'
+                      ?'post'
+                      :(
+                        /IN_PLAY|PAUSED/.test(m.status)
+                          ?'in'
+                          :'pre'
+                      ),
 
                   start:
                     m.utcDate||null
@@ -557,8 +545,7 @@ jobs:
               const k=
                 `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
 
-              const p=
-                latest.get(k);
+              const p=latest.get(k);
 
               if(
                 !p
@@ -566,14 +553,23 @@ jobs:
                 rank(r.status)>rank(p.status)
               ){
                 latest.set(k,r);
+
               }else if(
                 p
                 &&
                 rank(r.status)===rank(p.status)
               ){
+
                 const merged={...p,...r};
-                if(p.sh!=null && r.sh==null) merged.sh=p.sh;
-                if(p.sa!=null && r.sa==null) merged.sa=p.sa;
+
+                if(p.sh!=null && r.sh==null){
+                  merged.sh=p.sh;
+                }
+
+                if(p.sa!=null && r.sa==null){
+                  merged.sa=p.sa;
+                }
+
                 latest.set(k,merged);
               }
             }
@@ -583,8 +579,7 @@ jobs:
 
                 if(!r.start) return false;
 
-                const dt=
-                  new Date(r.start);
+                const dt=new Date(r.start);
 
                 return (
                   dt>=cutoff
@@ -613,8 +608,7 @@ jobs:
                 5*24*60*60*1000
               );
 
-            const pad=v=>
-              String(v).padStart(2,'0');
+            const pad=v=>String(v).padStart(2,'0');
 
             const dstr=d=>
               `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
@@ -645,9 +639,7 @@ jobs:
                 .filter(
                   m=>
                     !BAD.has(
-                      String(
-                        m.status||''
-                      ).toUpperCase()
+                      String(m.status||'').toUpperCase()
                     )
                 )
 
@@ -683,8 +675,7 @@ jobs:
 
                 .filter(r=>{
 
-                  const t=
-                    Date.parse(r.start||'');
+                  const t=Date.parse(r.start||'');
 
                   return (
                     Number.isFinite(t)
@@ -720,22 +711,17 @@ jobs:
 
           function isZeroStartCurrent(current){
 
-            const g=
-              asNum(current.giornata);
+            const g=asNum(current.giornata);
 
             const played=
               Array.isArray(current.played)
-                ?
-                  current.played.map(asNum)
-                :
-                  [];
+                ?current.played.map(asNum)
+                :[];
 
             const points=
               Array.isArray(current.points)
-                ?
-                  current.points.map(asNum)
-                :
-                  [];
+                ?current.points.map(asNum)
+                :[];
 
             const allPlayedZero=
               played.length
@@ -761,40 +747,71 @@ jobs:
           }
 
           function mergeMatch(existing,incoming){
+
             if(!existing) return incoming;
             if(!incoming) return existing;
 
             const oldRank=rank(existing.status);
             const newRank=rank(incoming.status);
 
-            // Mai regressione: post > in > pre.
+            /*
+              Non permettere regressioni:
+              post non torna in/pre
+              in non torna pre
+            */
             if(newRank<oldRank){
               return existing;
             }
 
             if(newRank>oldRank){
-              const advanced={...existing,...incoming};
 
-              if(incoming.sh==null && existing.sh!=null){
+              const advanced={
+                ...existing,
+                ...incoming
+              };
+
+              if(
+                incoming.sh==null
+                &&
+                existing.sh!=null
+              ){
                 advanced.sh=existing.sh;
               }
 
-              if(incoming.sa==null && existing.sa!=null){
+              if(
+                incoming.sa==null
+                &&
+                existing.sa!=null
+              ){
                 advanced.sa=existing.sa;
               }
 
               return advanced;
             }
 
-            // Stesso stato: usa il dato più recente,
-            // ma non cancellare un punteggio noto con null.
-            const merged={...existing,...incoming};
+            /*
+              Stesso stato:
+              usa i nuovi dati ma non cancella
+              un punteggio già conosciuto.
+            */
+            const merged={
+              ...existing,
+              ...incoming
+            };
 
-            if(existing.sh!=null && incoming.sh==null){
+            if(
+              existing.sh!=null
+              &&
+              incoming.sh==null
+            ){
               merged.sh=existing.sh;
             }
 
-            if(existing.sa!=null && incoming.sa==null){
+            if(
+              existing.sa!=null
+              &&
+              incoming.sa==null
+            ){
               merged.sa=existing.sa;
             }
 
@@ -816,10 +833,7 @@ jobs:
               await fetchUpcomingNext5Days();
 
             /*
-              Protezione pre-campionato:
-              se il Gist è azzerato e football-data restituisce
-              una stagione vecchia con tante partite giocate,
-              non sovrascriviamo Classifica.json.
+              Protezione pre-campionato.
             */
             if(
               isZeroStartCurrent(current)
@@ -834,26 +848,42 @@ jobs:
               return;
             }
 
-            const now=
-              new Date();
+            const now=new Date();
 
-            const map=
-              new Map();
+            const map=new Map();
 
-            // Mantiene lo stato migliore già conosciuto nel Gist.
+            /*
+              IMPORTANTE:
+              dal vecchio Gist manteniamo SOLO
+              partite già definitivamente FINITE.
+
+              Non conserviamo vecchi stati pre/in,
+              perché potrebbero essere ormai obsoleti.
+            */
             const previousMatches=[
-              ...(Array.isArray(current.results_raw)?current.results_raw:[]),
-              ...(Array.isArray(current.upcoming_raw)?current.upcoming_raw:[])
+              ...(Array.isArray(current.results_raw)
+                ?current.results_raw
+                :[]),
+              ...(Array.isArray(current.upcoming_raw)
+                ?current.upcoming_raw
+                :[])
             ];
 
             for(const r of previousMatches){
 
-              if(!r || !r.home || !r.away){
+              if(
+                !r
+                ||
+                !r.home
+                ||
+                !r.away
+                ||
+                r.status!=='post'
+              ){
                 continue;
               }
 
-              const k=
-                matchKey(r);
+              const k=matchKey(r);
 
               map.set(
                 k,
@@ -864,16 +894,22 @@ jobs:
               );
             }
 
-            // Aggiorna con le ultime 72 ore:
-            // può solo avanzare lo stato.
+            /*
+              Inserisce i dati freschi delle ultime 72 ore.
+            */
             for(const r of past72){
 
-              if(!r || !r.home || !r.away){
+              if(
+                !r
+                ||
+                !r.home
+                ||
+                !r.away
+              ){
                 continue;
               }
 
-              const k=
-                matchKey(r);
+              const k=matchKey(r);
 
               map.set(
                 k,
@@ -884,16 +920,24 @@ jobs:
               );
             }
 
-            // Aggiunge le future senza poter sovrascrivere
-            // una partita già live o finita.
+            /*
+              Inserisce le prossime partite.
+              Non può sovrascrivere una partita
+              già live o finita con pre.
+            */
             for(const r of next){
 
-              if(!r || !r.home || !r.away){
+              if(
+                !r
+                ||
+                !r.home
+                ||
+                !r.away
+              ){
                 continue;
               }
 
-              const k=
-                matchKey(r);
+              const k=matchKey(r);
 
               map.set(
                 k,
@@ -935,13 +979,10 @@ jobs:
 
                 .sort(
                   (a,b)=>
-                    String(
-                      a.start||''
-                    ).localeCompare(
-                      String(
-                        b.start||''
+                    String(a.start||'')
+                      .localeCompare(
+                        String(b.start||'')
                       )
-                    )
                 );
 
             const upcoming_raw=
@@ -963,9 +1004,7 @@ jobs:
                   );
                 })
 
-                .sort(
-                  cmpUpcoming
-                );
+                .sort(cmpUpcoming);
 
             if(ORDER==='desc'){
               upcoming_raw.reverse();
