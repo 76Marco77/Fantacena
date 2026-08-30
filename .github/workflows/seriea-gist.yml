@@ -1,4 +1,5 @@
-name: Update Gist (Serie A) — Football-Data + API-Football live
+
+name: Update Gist (Serie A) — stable monotonic results + fixtures
 
 on:
   workflow_dispatch:
@@ -9,11 +10,6 @@ on:
         default: asc
         type: choice
         options: [asc, desc]
-      force_api_football:
-        description: "Forza 1 chiamata API-Football anche fuori dalle finestre live"
-        required: false
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -30,24 +26,21 @@ jobs:
 
     steps:
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '20'
 
       - name: Check secrets
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
-          AF_TOKEN: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           test -n "$GIST_ID" || { echo "❌ Missing GIST_ID"; exit 1; }
           test -n "$GIST_TOKEN" || { echo "❌ Missing GIST_TOKEN"; exit 1; }
           test -n "$FD_TOKEN" || { echo "❌ Missing FOOTBALL_DATA_TOKEN"; exit 1; }
-          test -n "$AF_TOKEN" || { echo "❌ Missing API_FOOTBALL_KEY"; exit 1; }
           echo "::add-mask::$GIST_TOKEN"
           echo "::add-mask::$FD_TOKEN"
-          echo "::add-mask::$AF_TOKEN"
           echo "✅ Secrets OK"
 
       - name: Build and push Gist Serie A Fantacena 2027
@@ -55,10 +48,8 @@ jobs:
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
-          AF_TOKEN: ${{ secrets.API_FOOTBALL_KEY }}
           GIST_FILE: Classifica.json
           UPCOMING_ORDER: ${{ github.event.inputs.upcoming_order || vars.UPCOMING_ORDER || 'asc' }}
-          FORCE_API_FOOTBALL: ${{ github.event.inputs.force_api_football || 'false' }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -67,27 +58,14 @@ jobs:
         run: |
           node - <<'NODE'
           const FD='https://api.football-data.org/v4';
-          const AF='https://v3.football.api-sports.io';
-
           const COMP='SA';
-
-          // API-Football: Serie A
-          const AF_LEAGUE=135;
-
-          // Serie A 2026/27 -> stagione API-Football 2026
-          const AF_SEASON=2026;
-
           const TZ='Europe/Rome';
+          const MAX_SINGLE_MATCH_CHECKS=4;
 
           const HEAD_FD={
             'X-Auth-Token':process.env.FD_TOKEN,
             'Accept':'application/json',
             'User-Agent':'fantacena-updater'
-          };
-
-          const HEAD_AF={
-            'x-apisports-key':process.env.AF_TOKEN,
-            'Accept':'application/json'
           };
 
           const HEAD_GH={
@@ -97,41 +75,18 @@ jobs:
           };
 
           const TARGET_TEAMS=[
-            'Atalanta',
-            'Bologna',
-            'Cagliari',
-            'Como',
-            'Fiorentina',
-            'Frosinone',
-            'Genoa',
-            'Inter',
-            'Juventus',
-            'Lazio',
-            'Lecce',
-            'Milan',
-            'Monza',
-            'Napoli',
-            'Parma',
-            'Roma',
-            'Sassuolo',
-            'Torino',
-            'Udinese',
-            'Venezia'
+            'Atalanta','Bologna','Cagliari','Como','Fiorentina','Frosinone',
+            'Genoa','Inter','Juventus','Lazio','Lecce','Milan','Monza','Napoli',
+            'Parma','Roma','Sassuolo','Torino','Udinese','Venezia'
           ];
 
           const TARGET_SET=new Set(TARGET_TEAMS);
 
-          const cleanName=s=>
-            String(s||'')
-              .replace(/\s+/g,' ')
-              .replace(/\./g,'')
-              .trim();
+          const cleanName=s=>String(s||'')
+            .replace(/\s+/g,' ')
+            .replace(/\./g,'')
+            .trim();
 
-          /*
-            Alias necessari perché Fantacena usa ancora
-            alcuni nomi logici differenti dalle squadre
-            reali 2026/27.
-          */
           const aliasPairs=[
             ['Atalanta BC','Atalanta'],
             ['Bologna FC 1909','Bologna'],
@@ -159,27 +114,20 @@ jobs:
 
             ['Cremonese','Frosinone'],
             ['US Cremonese','Frosinone'],
-
             ['Hellas Verona','Monza'],
             ['Verona','Monza'],
-
             ['AC Pisa','Venezia'],
             ['Pisa','Venezia'],
             ['Pisa SC','Venezia']
           ];
 
-          const TEAM_ALIAS=
-            new Map(
-              TARGET_TEAMS.map(
-                t=>[
-                  t.toLowerCase(),
-                  t
-                ]
-              )
-            );
+          const TEAM_ALIAS=new Map();
+
+          for(const t of TARGET_TEAMS){
+            TEAM_ALIAS.set(t.toLowerCase(),t);
+          }
 
           for(const [from,to] of aliasPairs){
-
             TEAM_ALIAS.set(
               cleanName(from).toLowerCase(),
               to
@@ -187,93 +135,52 @@ jobs:
           }
 
           const normTeam=s=>{
+            const n=cleanName(s);
 
-            const n=
-              cleanName(s);
+            if(!n) return '';
 
-            return n
-              ?
-                (
-                  TEAM_ALIAS.get(
-                    n.toLowerCase()
-                  )
-                  ||
-                  n
-                )
-              :
-                '';
+            return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
           const ORDER=
-            String(
-              process.env.UPCOMING_ORDER
-              ||
-              'asc'
-            ).toLowerCase()==='desc'
-              ?
-                'desc'
-              :
-                'asc';
-
-          const FORCE_AF=
-            String(
-              process.env.FORCE_API_FOOTBALL
-              ||
-              'false'
-            ).toLowerCase()==='true';
+            String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc'
+              ? 'desc'
+              : 'asc';
 
           const sleep=ms=>
-            new Promise(
-              r=>setTimeout(r,ms)
-            );
+            new Promise(r=>setTimeout(r,ms));
 
           async function fetchRetry(
-            url,
+            u,
             opt={},
             tries=4
           ){
 
-            for(
-              let i=0;
-              i<tries;
-              i++
-            ){
+            for(let i=0;i<tries;i++){
 
-              const r=
-                await fetch(
-                  url,
-                  opt
-                ).catch(e=>{
-
-                  throw new Error(
-                    `${opt.method||'GET'} ${url} :: ${e.message||e}`
-                  );
-                });
+              const r=await fetch(u,opt).catch(e=>{
+                throw new Error(
+                  `${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`
+                );
+              });
 
               if(r.ok){
                 return r;
               }
 
               const txt=
-                await r.text()
-                  .catch(
-                    ()=>''
-                  );
+                await r.text().catch(()=>'');
+
+              const retryable=
+                [429,500,502,503,504].includes(r.status);
 
               if(
-                ![
-                  429,
-                  500,
-                  502,
-                  503,
-                  504
-                ].includes(r.status)
+                !retryable
                 ||
                 i===tries-1
               ){
-
                 throw new Error(
-                  `${opt.method||'GET'} ${r.status} ${url} :: ${txt.slice(0,350).replace(/\s+/g,' ')}`
+                  `${opt.method||'GET'} ${r.status} ${u} :: ${txt.slice(0,300).replace(/\s+/g,' ')}`
                 );
               }
 
@@ -283,26 +190,24 @@ jobs:
             }
           }
 
-          async function httpFD(url){
+          async function httpFD(u){
 
             const r=
               await fetchRetry(
-                url,
-                {
-                  headers:HEAD_FD
-                }
+                u,
+                {headers:HEAD_FD}
               );
 
             return r.json();
           }
 
           async function gh(
-            url,
+            u,
             opt={}
           ){
 
             return fetchRetry(
-              url,
+              u,
               {
                 ...opt,
 
@@ -334,12 +239,8 @@ jobs:
             try{
 
               return f?.content
-                ?
-                  JSON.parse(
-                    f.content
-                  )
-                :
-                  {};
+                ? JSON.parse(f.content)
+                : {};
 
             }catch{
 
@@ -351,11 +252,7 @@ jobs:
 
             const body={
               files:{
-                [
-                  process.env.GIST_FILE
-                  ||
-                  'Classifica.json'
-                ]:{
+                [process.env.GIST_FILE||'Classifica.json']:{
                   content:
                     JSON.stringify(
                       payload,
@@ -381,23 +278,13 @@ jobs:
             );
           }
 
-          /*
-            Stato Fantacena normalizzato:
-
-            pre  = da giocare
-            in   = live
-            post = finita
-          */
           function canonicalStatus(s){
 
             const st=
               String(s||'')
                 .trim()
                 .toUpperCase()
-                .replace(
-                  /[-\s]+/g,
-                  '_'
-                );
+                .replace(/[-\s]+/g,'_');
 
             if(
               [
@@ -405,8 +292,6 @@ jobs:
                 'AWARDED',
                 'POST',
                 'FT',
-                'AET',
-                'PEN',
                 'FULL_TIME'
               ].includes(st)
             ){
@@ -421,13 +306,10 @@ jobs:
                 'HALF_TIME',
                 'HT',
                 'EXTRA_TIME',
+                'PENALTY_SHOOTOUT',
                 '1H',
                 '2H',
-                'ET',
-                'BT',
-                'P',
-                'INT',
-                'SUSP'
+                'IN'
               ].includes(st)
             ){
               return 'in';
@@ -437,10 +319,7 @@ jobs:
               [
                 'SCHEDULED',
                 'TIMED',
-                'PRE',
-                'NS',
-                'TBD',
-                'PST'
+                'PRE'
               ].includes(st)
             ){
               return 'pre';
@@ -454,46 +333,175 @@ jobs:
             const st=
               canonicalStatus(s);
 
-            return st==='post'
-              ?
-                3
-              :
-                st==='in'
-                  ?
-                    2
-                  :
-                    st==='pre'
-                      ?
-                        1
-                      :
-                        0;
+            if(st==='post'){
+              return 3;
+            }
+
+            if(st==='in'){
+              return 2;
+            }
+
+            if(st==='pre'){
+              return 1;
+            }
+
+            return 0;
           }
 
           const asNum=v=>
-            Number.isFinite(
-              Number(v)
-            )
-              ?
-                Number(v)
-              :
-                0;
+            Number.isFinite(Number(v))
+              ? Number(v)
+              : 0;
+
+          function normalizeProviderMatch(m){
+
+            const home=
+              normTeam(
+                m?.homeTeam?.shortName
+                ||
+                m?.homeTeam?.name
+                ||
+                m?.homeTeam?.tla
+                ||
+                m?.home
+              );
+
+            const away=
+              normTeam(
+                m?.awayTeam?.shortName
+                ||
+                m?.awayTeam?.name
+                ||
+                m?.awayTeam?.tla
+                ||
+                m?.away
+              );
+
+            const providerStatus=
+              String(
+                m?.status||''
+              ).toUpperCase();
+
+            const status=
+              canonicalStatus(
+                providerStatus
+              );
+
+            return {
+              id:
+                m?.id
+                ??
+                null,
+
+              home,
+
+              away,
+
+              sh:
+                m?.score?.fullTime?.home
+                ??
+                m?.score?.regularTime?.home
+                ??
+                m?.score?.halfTime?.home
+                ??
+                m?.sh
+                ??
+                null,
+
+              sa:
+                m?.score?.fullTime?.away
+                ??
+                m?.score?.regularTime?.away
+                ??
+                m?.score?.halfTime?.away
+                ??
+                m?.sa
+                ??
+                null,
+
+              status,
+
+              provider_status:
+                providerStatus
+                ||
+                null,
+
+              start:
+                m?.utcDate
+                ||
+                m?.start
+                ||
+                null,
+
+              matchday:
+                Number(m?.matchday)
+                ||
+                null,
+
+              provider_last_updated:
+                m?.lastUpdated
+                ||
+                null
+            };
+          }
+
+          function normalizeStoredMatch(m){
+
+            return {
+              ...m,
+
+              home:
+                normTeam(
+                  m?.home
+                ),
+
+              away:
+                normTeam(
+                  m?.away
+                ),
+
+              status:
+                canonicalStatus(
+                  m?.status
+                ),
+
+              start:
+                m?.start
+                ||
+                m?.utcDate
+                ||
+                null,
+
+              sh:
+                m?.sh
+                ??
+                null,
+
+              sa:
+                m?.sa
+                ??
+                null
+            };
+          }
 
           /*
-            La chiave NON contiene l'orario.
+            NON usiamo l'orario nella chiave.
 
-            Se un provider modifica leggermente
-            il kickoff, la partita resta la stessa.
+            Se football-data modifica il kickoff,
+            Juventus-Parma rimane la stessa partita
+            e non viene duplicata.
           */
-          const matchKey=r=>
-            `${String(r?.home||'').toLowerCase()}|${String(r?.away||'').toLowerCase()}`;
+          function matchKey(r){
 
-          /*
-            REGOLA FONDAMENTALE:
+            return (
+              `${String(r?.home||'').toLowerCase()}`
+              +
+              '|'
+              +
+              `${String(r?.away||'').toLowerCase()}`
+            );
+          }
 
-            PRE -> LIVE -> FINITA
-
-            MAI INDIETRO.
-          */
           function mergeMatch(
             existing,
             incoming
@@ -507,19 +515,28 @@ jobs:
               return existing;
             }
 
-            const oldRank=
-              rank(
+            const oldStatus=
+              canonicalStatus(
                 existing.status
               );
 
-            const newRank=
-              rank(
+            const newStatus=
+              canonicalStatus(
                 incoming.status
               );
 
+            const oldRank=
+              rank(oldStatus);
+
+            const newRank=
+              rank(newStatus);
+
             /*
-              Se il nuovo provider restituisce
-              uno stato più vecchio, ignoralo.
+              REGOLA FONDAMENTALE:
+
+              PRE -> IN -> POST
+
+              MAI AL CONTRARIO.
             */
             if(
               newRank
@@ -529,20 +546,57 @@ jobs:
               return existing;
             }
 
+            if(
+              newRank
+              >
+              oldRank
+            ){
+
+              const advanced={
+                ...existing,
+                ...incoming,
+                status:newStatus
+              };
+
+              /*
+                Un aggiornamento di stato
+                senza punteggio non cancella
+                un punteggio già conosciuto.
+              */
+              if(
+                incoming.sh==null
+                &&
+                existing.sh!=null
+              ){
+                advanced.sh=
+                  existing.sh;
+              }
+
+              if(
+                incoming.sa==null
+                &&
+                existing.sa!=null
+              ){
+                advanced.sa=
+                  existing.sa;
+              }
+
+              return advanced;
+            }
+
+            /*
+              STESSO STATO.
+
+              Accettiamo i nuovi dati,
+              ma un null non cancella
+              un valore già conosciuto.
+            */
             const merged={
               ...existing,
               ...incoming,
-
-              status:
-                canonicalStatus(
-                  incoming.status
-                )
+              status:newStatus
             };
 
-            /*
-              Un null non cancella mai
-              un risultato già conosciuto.
-            */
             if(
               incoming.sh==null
               &&
@@ -559,6 +613,15 @@ jobs:
             ){
               merged.sa=
                 existing.sa;
+            }
+
+            if(
+              incoming.id==null
+              &&
+              existing.id!=null
+            ){
+              merged.id=
+                existing.id;
             }
 
             if(
@@ -606,148 +669,13 @@ jobs:
             );
           }
 
-          /*
-            ========================================================
-            FINESTRE API-FOOTBALL
-            ========================================================
-
-            Una sola richiesta API-Football
-            per ogni esecuzione del workflow.
-
-            VENERDÌ:
-            18:25 - 20:35
-            20:40 - 23:05
-
-            SABATO:
-            18:25 - 20:35
-            20:40 - 23:05
-
-            DOMENICA:
-            14:55 - 17:20
-            18:25 - 20:35
-            20:40 - 23:05
-
-            LUNEDÌ:
-            18:25 - 20:35
-            20:40 - 23:05
-
-            Tutto in Europe/Rome.
-            ========================================================
-          */
-
-          function romeClock(now){
-
-            const p=
-              new Intl.DateTimeFormat(
-                'en-US',
-                {
-                  timeZone:TZ,
-                  weekday:'short',
-                  hour:'2-digit',
-                  minute:'2-digit',
-                  hourCycle:'h23'
-                }
-              ).formatToParts(now);
-
-            const get=t=>
-              p.find(
-                x=>x.type===t
-              )?.value
-              ||
-              '';
-
-            return {
-              weekday:
-                get('weekday'),
-
-              hour:
-                Number(
-                  get('hour')
-                ),
-
-              minute:
-                Number(
-                  get('minute')
-                )
-            };
-          }
-
-          const hm=(h,m)=>
-            h*60+m;
-
-          const inside=(
-            v,
-            a,
-            b
-          )=>
-            v>=a
-            &&
-            v<=b;
-
-          function apiFootballWindow(now){
-
-            const c=
-              romeClock(now);
-
-            const m=
-              hm(
-                c.hour,
-                c.minute
-              );
-
-            const evening=
-              inside(
-                m,
-                hm(18,25),
-                hm(20,35)
-              )
-              ||
-              inside(
-                m,
-                hm(20,40),
-                hm(23,5)
-              );
-
-            if(
-              [
-                'Fri',
-                'Sat',
-                'Mon'
-              ].includes(
-                c.weekday
-              )
-            ){
-              return evening;
-            }
-
-            if(
-              c.weekday==='Sun'
-            ){
-
-              return (
-                inside(
-                  m,
-                  hm(14,55),
-                  hm(17,20)
-                )
-                ||
-                evening
-              );
-            }
-
-            return false;
-          }
-
           function pad(v){
 
             return String(v)
-              .padStart(
-                2,
-                '0'
-              );
+              .padStart(2,'0');
           }
 
-          function dstrUTC(d){
+          function dstr(d){
 
             return (
               `${d.getUTCFullYear()}`
@@ -762,13 +690,6 @@ jobs:
             );
           }
 
-          /*
-            ========================================================
-            FOOTBALL-DATA:
-            CLASSIFICA + CALENDARIO
-            ========================================================
-          */
-
           async function fetchStandings(){
 
             const j=
@@ -776,7 +697,7 @@ jobs:
                 `${FD}/competitions/${COMP}/standings`
               );
 
-            const table=
+            const t=
               j.standings
                 ?.find(
                   s=>/TOTAL/i.test(s.type)
@@ -786,14 +707,9 @@ jobs:
               [];
 
             const rows=[];
-            const seen=
-              new Set();
+            const seen=new Set();
 
-            for(
-              const r
-              of
-              table
-            ){
+            for(const r of t){
 
               const team=
                 normTeam(
@@ -816,12 +732,10 @@ jobs:
 
               rows.push({
                 team,
-
                 played:
                   asNum(
                     r.playedGames
                   ),
-
                 points:
                   asNum(
                     r.points
@@ -863,9 +777,7 @@ jobs:
                 j?.season?.currentMatchday
               )
               ||
-              playedMax
-              ||
-              1;
+              0;
 
             return {
               giornata:
@@ -874,8 +786,7 @@ jobs:
               providerMatchday:
                 Math.max(
                   providerMatchday,
-                  playedMax,
-                  1
+                  playedMax
                 ),
 
               teams:
@@ -897,76 +808,58 @@ jobs:
             };
           }
 
-          function normalizeFDMatch(m){
+          async function fetchWindowMatches(
+            now
+          ){
 
-            return {
-              id:
-                m?.id
-                ??
-                null,
+            const from=
+              new Date(
+                now.getTime()
+                -
+                96*60*60*1000
+              );
 
-              fd_id:
-                m?.id
-                ??
-                null,
+            const to=
+              new Date(
+                now.getTime()
+                +
+                5*24*60*60*1000
+              );
 
-              home:
-                normTeam(
-                  m?.homeTeam?.shortName
-                  ||
-                  m?.homeTeam?.name
-                  ||
-                  m?.homeTeam?.tla
-                ),
+            const j=
+              await httpFD(
+                `${FD}/competitions/${COMP}/matches?dateFrom=${dstr(from)}&dateTo=${dstr(to)}`
+              );
 
-              away:
-                normTeam(
-                  m?.awayTeam?.shortName
-                  ||
-                  m?.awayTeam?.name
-                  ||
-                  m?.awayTeam?.tla
-                ),
-
-              /*
-                NON prendiamo i risultati
-                da football-data.
-
-                Serve soltanto per calendario.
-              */
-              sh:null,
-              sa:null,
-              status:'pre',
-
-              start:
-                m?.utcDate
-                ||
-                null,
-
-              matchday:
-                Number(
-                  m?.matchday
-                )
-                ||
-                null,
-
-              fd_status:
-                String(
-                  m?.status
-                  ||
-                  ''
-                ).toUpperCase()
-                ||
-                null,
-
-              source_schedule:
-                'football-data.org'
-            };
+            return (
+              j.matches
+              ||
+              []
+            )
+              .map(
+                normalizeProviderMatch
+              )
+              .filter(
+                r=>
+                  TARGET_SET.has(r.home)
+                  &&
+                  TARGET_SET.has(r.away)
+              );
           }
 
-          async function fetchCurrentMatchdaySchedule(
+          async function fetchMatchdayMatches(
             matchday
           ){
+
+            if(
+              !Number.isFinite(
+                Number(matchday)
+              )
+              ||
+              Number(matchday)<=0
+            ){
+              return [];
+            }
 
             const j=
               await httpFD(
@@ -979,7 +872,7 @@ jobs:
               []
             )
               .map(
-                normalizeFDMatch
+                normalizeProviderMatch
               )
               .filter(
                 r=>
@@ -989,222 +882,104 @@ jobs:
               );
           }
 
-          /*
-            ========================================================
-            API-FOOTBALL:
-            RISULTATI LIVE + FINALI
-            ========================================================
-          */
+          async function verifySuspiciousMatches(
+            map,
+            now
+          ){
 
-          function normalizeAFMatch(x){
+            const candidates=
+              [...map.values()]
 
-            const fixture=
-              x?.fixture
-              ||
-              {};
+                .filter(r=>{
 
-            const teams=
-              x?.teams
-              ||
-              {};
+                  if(
+                    !r?.id
+                    ||
+                    !r?.start
+                  ){
+                    return false;
+                  }
 
-            const goals=
-              x?.goals
-              ||
-              {};
+                  const t=
+                    Date.parse(
+                      r.start
+                    );
 
-            const score=
-              x?.score
-              ||
-              {};
+                  if(
+                    !Number.isFinite(t)
+                  ){
+                    return false;
+                  }
 
-            const st=
-              fixture?.status
-              ||
-              {};
+                  const st=
+                    canonicalStatus(
+                      r.status
+                    );
 
-            return {
-              id:
-                fixture?.id
-                ??
-                null,
+                  /*
+                    Ricontrolla:
 
-              api_football_id:
-                fixture?.id
-                ??
-                null,
-
-              home:
-                normTeam(
-                  teams?.home?.name
-                ),
-
-              away:
-                normTeam(
-                  teams?.away?.name
-                ),
-
-              sh:
-                goals?.home
-                ??
-                score?.fulltime?.home
-                ??
-                score?.halftime?.home
-                ??
-                null,
-
-              sa:
-                goals?.away
-                ??
-                score?.fulltime?.away
-                ??
-                score?.halftime?.away
-                ??
-                null,
-
-              status:
-                canonicalStatus(
-                  st?.short
-                  ||
-                  st?.long
-                ),
-
-              start:
-                fixture?.date
-                ||
-                null,
-
-              provider_status:
-                String(
-                  st?.short
-                  ||
-                  st?.long
-                  ||
-                  ''
-                ).toUpperCase()
-                ||
-                null,
-
-              provider_elapsed:
-                Number.isFinite(
-                  Number(
-                    st?.elapsed
-                  )
-                )
-                  ?
-                    Number(
-                      st.elapsed
+                    - match già LIVE;
+                    - match PRE con kickoff passato.
+                  */
+                  return (
+                    st==='in'
+                    ||
+                    (
+                      st==='pre'
+                      &&
+                      t<=now.getTime()
                     )
-                  :
-                    null,
-
-              source_results:
-                'api-football'
-            };
-          }
-
-          /*
-            Una SOLA chiamata API-Football.
-
-            Cerchiamo gli ultimi 7 giorni
-            fino a domani.
-
-            Questo serve anche a recuperare
-            eventuali risultati precedenti
-            che football-data aveva lasciato TIMED.
-          */
-          async function fetchApiFootballFixtures(now){
-
-            const from=
-              new Date(
-                now.getTime()
-                -
-                7*24*60*60*1000
-              );
-
-            const to=
-              new Date(
-                now.getTime()
-                +
-                24*60*60*1000
-              );
-
-            const url=
-              `${AF}/fixtures`
-              +
-              `?league=${AF_LEAGUE}`
-              +
-              `&season=${AF_SEASON}`
-              +
-              `&from=${dstrUTC(from)}`
-              +
-              `&to=${dstrUTC(to)}`;
-
-            const r=
-              await fetchRetry(
-                url,
-                {
-                  headers:HEAD_AF
-                }
-              );
-
-            const remaining=
-              r.headers.get(
-                'x-ratelimit-requests-remaining'
-              )
-              ||
-              r.headers.get(
-                'x-ratelimit-remaining'
-              )
-              ||
-              null;
-
-            const j=
-              await r.json();
-
-            const errors=
-              j?.errors;
-
-            const hasErrors=
-              Array.isArray(errors)
-                ?
-                  errors.length>0
-                :
-                  (
-                    errors
-                    &&
-                    typeof errors==='object'
-                    &&
-                    Object.keys(errors).length>0
                   );
+                })
 
-            if(hasErrors){
-
-              throw new Error(
-                `API-Football errors: ${JSON.stringify(errors).slice(0,500)}`
-              );
-            }
-
-            const rows=
-              (
-                j.response
-                ||
-                []
-              )
-                .map(
-                  normalizeAFMatch
+                .sort(
+                  (a,b)=>
+                    Date.parse(b.start||0)
+                    -
+                    Date.parse(a.start||0)
                 )
-                .filter(
-                  r=>
-                    TARGET_SET.has(r.home)
-                    &&
-                    TARGET_SET.has(r.away)
+
+                .slice(
+                  0,
+                  MAX_SINGLE_MATCH_CHECKS
                 );
 
-            return {
-              rows,
-              remaining
-            };
+            for(
+              const r
+              of
+              candidates
+            ){
+
+              try{
+
+                const raw=
+                  await httpFD(
+                    `${FD}/matches/${r.id}`
+                  );
+
+                const fresh=
+                  normalizeProviderMatch(
+                    raw
+                  );
+
+                putMatch(
+                  map,
+                  fresh
+                );
+
+                console.log(
+                  `🔎 Match ${r.id}: ${fresh.home}-${fresh.away} | ${fresh.provider_status} | ${fresh.sh ?? '-'}-${fresh.sa ?? '-'}`
+                );
+
+              }catch(e){
+
+                console.warn(
+                  `⚠️ Verifica singola match ${r.id} fallita:`,
+                  e.message
+                );
+              }
+            }
           }
 
           function isZeroStartCurrent(
@@ -1221,9 +996,7 @@ jobs:
                 current.played
               )
                 ?
-                  current.played.map(
-                    asNum
-                  )
+                  current.played.map(asNum)
                 :
                   [];
 
@@ -1232,9 +1005,7 @@ jobs:
                 current.points
               )
                 ?
-                  current.points.map(
-                    asNum
-                  )
+                  current.points.map(asNum)
                 :
                   [];
 
@@ -1260,22 +1031,32 @@ jobs:
             const now=
               new Date();
 
-            /*
-              Legge il Gist precedente.
-
-              Serve anche per garantire:
-              PRE -> LIVE -> POST
-              mai indietro.
-            */
             const current=
               await readCurrent();
 
-            /*
-              CLASSIFICA:
-              sempre football-data.
-            */
             const st=
               await fetchStandings();
+
+            /*
+              Leggiamo la stessa competizione
+              in due modi diversi:
+
+              1. finestra temporale;
+              2. giornata corrente.
+
+              Se una delle due risposte è più avanzata,
+              viene mantenuta quella migliore.
+            */
+            const [
+              windowMatches,
+              matchdayMatches
+            ]=
+              await Promise.all([
+                fetchWindowMatches(now),
+                fetchMatchdayMatches(
+                  st.providerMatchday
+                )
+              ]);
 
             /*
               Protezione pre-campionato.
@@ -1287,46 +1068,27 @@ jobs:
             ){
 
               console.log(
-                `🛑 Preseason guard: Gist non modificato. football-data giornata=${st.giornata}`
+                `🛑 Preseason guard attiva: Classifica.json resta azzerato. football-data giornata=${st.giornata}`
               );
 
               return;
             }
 
-            /*
-              CALENDARIO:
-              sempre football-data.
-            */
-            const schedule=
-              await fetchCurrentMatchdaySchedule(
-                st.providerMatchday
-              );
-
-            /*
-              Le chiavi delle 10 partite
-              della giornata corrente.
-            */
-            const currentRoundKeys=
-              new Set(
-                schedule.map(
-                  matchKey
-                )
-              );
-
             const map=
               new Map();
 
             /*
-              1) MEMORIA.
+              MEMORIA DEL GIST.
 
-              Conserva il miglior stato già visto.
+              Stavolta conserviamo PRE, IN e POST.
 
-              Se una partita era LIVE,
-              una successiva risposta PRE
-              non la fa tornare indietro.
+              Questo è fondamentale:
+              se Juventus-Parma era già IN,
+              una risposta successiva TIMED
+              NON la può riportare PRE.
 
-              Se era FINITA,
-              rimane FINITA.
+              Se era POST,
+              non può tornare IN o PRE.
             */
             const previous=[
               ...(
@@ -1356,59 +1118,24 @@ jobs:
               previous
             ){
 
+              const r=
+                normalizeStoredMatch(
+                  raw
+                );
+
               putMatch(
                 map,
-                {
-                  ...raw,
-
-                  home:
-                    normTeam(
-                      raw?.home
-                    ),
-
-                  away:
-                    normTeam(
-                      raw?.away
-                    ),
-
-                  status:
-                    canonicalStatus(
-                      raw?.status
-                    ),
-
-                  start:
-                    raw?.start
-                    ||
-                    raw?.utcDate
-                    ||
-                    null,
-
-                  sh:
-                    raw?.sh
-                    ??
-                    null,
-
-                  sa:
-                    raw?.sa
-                    ??
-                    null
-                }
+                r
               );
             }
 
             /*
-              2) CALENDARIO FOOTBALL-DATA.
-
-              Fornisce partite e orari.
-
-              Poiché queste entrano come PRE,
-              mergeMatch NON può far regredire
-              una partita già LIVE o FINITA.
+              Aggiornamento dalla finestra.
             */
             for(
               const r
               of
-              schedule
+              windowMatches
             ){
 
               putMatch(
@@ -1417,131 +1144,77 @@ jobs:
               );
             }
 
-            let apiFootballCalled=false;
-            let apiFootballRemaining=null;
-            let apiFootballRows=0;
-            let apiFootballError=null;
-
-            const inLiveWindow=
-              apiFootballWindow(
-                now
-              );
-
             /*
-              3) RISULTATI API-FOOTBALL.
+              Aggiornamento specifico giornata.
 
-              UNA SOLA richiesta per esecuzione.
-
-              La chiamata parte solo:
-              - nelle finestre definite;
-              - oppure se manualmente scegli
-                force_api_football=true.
+              Se questo endpoint restituisce
+              uno stato più avanzato rispetto
+              al date-range, vince lui.
             */
-            if(
-              FORCE_AF
-              ||
-              inLiveWindow
+            for(
+              const r
+              of
+              matchdayMatches
             ){
 
-              try{
-
-                const af=
-                  await fetchApiFootballFixtures(
-                    now
-                  );
-
-                apiFootballCalled=true;
-
-                apiFootballRemaining=
-                  af.remaining;
-
-                apiFootballRows=
-                  af.rows.length;
-
-                /*
-                  Importiamo soltanto le partite
-                  che appartengono alla giornata
-                  corrente di Fantacena.
-                */
-                for(
-                  const r
-                  of
-                  af.rows
-                ){
-
-                  if(
-                    currentRoundKeys.has(
-                      matchKey(r)
-                    )
-                  ){
-
-                    putMatch(
-                      map,
-                      r
-                    );
-                  }
-                }
-
-                console.log(
-                  `⚽ API-Football OK | fixtures=${af.rows.length} | quota residua=${apiFootballRemaining??'?'}`
-                );
-
-              }catch(e){
-
-                apiFootballCalled=true;
-
-                apiFootballError=
-                  e.message
-                  ||
-                  String(e);
-
-                console.warn(
-                  '⚠️ API-Football non disponibile:',
-                  apiFootballError
-                );
-              }
-
-            }else{
-
-              console.log(
-                '⏸️ API-Football non chiamata: fuori dalla finestra risultati.'
+              putMatch(
+                map,
+                r
               );
             }
 
             /*
-              Manteniamo nel JSON le 10 partite
-              della giornata corrente.
+              Controllo aggiuntivo del singolo match.
+
+              Utile proprio per casi come:
+              partita iniziata ma lista ancora TIMED.
             */
+            await verifySuspiciousMatches(
+              map,
+              now
+            );
+
+            const minKeep=
+              now.getTime()
+              -
+              96*60*60*1000;
+
+            const maxKeep=
+              now.getTime()
+              +
+              5*24*60*60*1000;
+
             const results_raw=
               [...map.values()]
 
-                .filter(
-                  r=>
-                    currentRoundKeys.has(
-                      matchKey(r)
-                    )
-                )
+                .filter(r=>{
+
+                  const t=
+                    Date.parse(
+                      r?.start||''
+                    );
+
+                  return (
+                    Number.isFinite(t)
+                    &&
+                    t>=minKeep
+                    &&
+                    t<=maxKeep
+                  );
+                })
 
                 .sort(
                   (a,b)=>
                     String(
-                      a.start
-                      ||
-                      ''
-                    ).localeCompare(
-                      String(
-                        b.start
-                        ||
-                        ''
-                      )
+                      a.start||''
                     )
+                      .localeCompare(
+                        String(
+                          b.start||''
+                        )
+                      )
                 );
 
-            /*
-              upcoming_raw contiene soltanto
-              partite ancora PRE
-              e con kickoff futuro.
-            */
             let upcoming_raw=
               results_raw
 
@@ -1549,9 +1222,7 @@ jobs:
 
                   const t=
                     Date.parse(
-                      r?.start
-                      ||
-                      ''
+                      r?.start||''
                     );
 
                   return (
@@ -1566,24 +1237,36 @@ jobs:
                 })
 
                 .sort(
-                  (a,b)=>
-                    Date.parse(
-                      a.start
-                      ||
-                      0
-                    )
-                    -
-                    Date.parse(
-                      b.start
-                      ||
-                      0
-                    )
+                  (a,b)=>{
+
+                    const ta=
+                      Date.parse(
+                        a.start||''
+                      );
+
+                    const tb=
+                      Date.parse(
+                        b.start||''
+                      );
+
+                    if(
+                      ta!==tb
+                    ){
+                      return ta-tb;
+                    }
+
+                    return (
+                      `${a.home}${a.away}`
+                        .localeCompare(
+                          `${b.home}${b.away}`
+                        )
+                    );
+                  }
                 );
 
             if(
               ORDER==='desc'
             ){
-
               upcoming_raw=
                 upcoming_raw.reverse();
             }
@@ -1591,10 +1274,6 @@ jobs:
             const payload={
               ...current,
 
-              /*
-                CLASSIFICA:
-                football-data.
-              */
               giornata:
                 st.giornata,
 
@@ -1610,11 +1289,6 @@ jobs:
               points:
                 st.points,
 
-              /*
-                PARTITE:
-                calendario football-data
-                + risultati API-Football.
-              */
               results_raw,
 
               upcoming_raw,
@@ -1660,27 +1334,6 @@ jobs:
                 provider_matchday:
                   st.providerMatchday,
 
-                api_football:{
-
-                  called:
-                    apiFootballCalled,
-
-                  forced:
-                    FORCE_AF,
-
-                  in_live_window:
-                    inLiveWindow,
-
-                  rows:
-                    apiFootballRows,
-
-                  remaining_requests:
-                    apiFootballRemaining,
-
-                  error:
-                    apiFootballError
-                },
-
                 now_local:
                   new Intl.DateTimeFormat(
                     'sv-SE',
@@ -1723,20 +1376,20 @@ jobs:
 
               _sources:{
 
+                provider:
+                  'football-data.org',
+
                 standings:
-                  'football-data.org',
+                  'football-data_standings',
 
-                schedule:
-                  'football-data.org',
+                matches_window:
+                  'football-data_matches_-96h_+5d',
 
-                results_live_final:
-                  'api-football',
+                matches_matchday:
+                  'football-data_matches_current_matchday',
 
-                api_football_league:
-                  AF_LEAGUE,
-
-                api_football_season:
-                  AF_SEASON,
+                suspicious_match_check:
+                  'football-data_single_match_max_4',
 
                 scorers:
                   'manual'
@@ -1748,17 +1401,7 @@ jobs:
             );
 
             console.log(
-              `✅ Gist aggiornato | giornata=${payload.giornata}`
-              +
-              ` | results=${results_raw.length}`
-              +
-              ` | pre:${payload.counts.pre}`
-              +
-              ` in:${payload.counts.in}`
-              +
-              ` post:${payload.counts.post}`
-              +
-              ` | API-Football=${apiFootballCalled?'SI':'NO'}`
+              `✅ Gist aggiornato | giornata=${payload.giornata} | providerMatchday=${st.providerMatchday} | results=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`
             );
 
           })().catch(e=>{
