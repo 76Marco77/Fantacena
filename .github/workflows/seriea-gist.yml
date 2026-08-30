@@ -1,6 +1,23 @@
 name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
+  schedule:
+    # Venerdì
+    - cron: "*/15 16-23 * * 5"
+
+    # Sabato a partire dalle 15:00 ora di Roma
+    - cron: "*/15 13-23 * 4-10 6"
+    - cron: "*/15 14-23 * 11,12,1,2,3 6"
+
+    # Lunedì
+    - cron: "*/15 16-23 * * 1"
+
+    # Domenica
+    - cron: "30,45 10 * * 0"
+    - cron: "0,15,30,45 11-21 * * 0"
+    - cron: "0,15,30 22 * * 0"
+    - cron: "*/15 23 * * 0"
+
   workflow_dispatch:
     inputs:
       upcoming_order:
@@ -29,24 +46,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Diagnose trigger and schedule
-        run: |
-          echo "========================================"
-          echo "GITHUB ACTIONS TRIGGER DIAGNOSTICS"
-          echo "========================================"
-          echo "Event: ${{ github.event_name }}"
-          echo "Schedule: ${{ github.event.schedule }}"
-          echo "Run ID: ${{ github.run_id }}"
-          echo "Run attempt: ${{ github.run_attempt }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Workflow: ${{ github.workflow }}"
-          echo "Branch/ref: ${{ github.ref }}"
-          echo "UTC reale:"
-          date -u
-          echo "Ora Europe/Rome:"
-          TZ=Europe/Rome date
-          echo "========================================"
-
       - name: Check secrets
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
@@ -72,11 +71,7 @@ jobs:
 
           console.log(
             '⏱️ Local:',
-            new Intl.DateTimeFormat('it-IT',{
-              dateStyle:'full',
-              timeStyle:'long',
-              timeZone:TZ
-            }).format(now),
+            new Intl.DateTimeFormat('it-IT',{dateStyle:'full',timeStyle:'long',timeZone:TZ}).format(now),
             '| UTC:',
             now.toISOString()
           );
@@ -108,89 +103,15 @@ jobs:
             console.log(`→ ${opt?.method||'GET'} ${url} :: ${r.status} ok=${r.ok}`);
 
             if(!r.ok){
-              throw new Error(
-                `${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`
-              );
+              throw new Error(`${r.status} ${url} :: ${t.slice(0,300).replace(/\s+/g,' ')}`);
             }
           }
 
           (async()=>{
             await probe(GH,{headers:HEAD_GH});
-
-            await probe(
-              'https://api.football-data.org/v4/competitions/SA',
-              {headers:HEAD_FD}
-            );
+            await probe('https://api.football-data.org/v4/competitions/SA',{headers:HEAD_FD});
           })().catch(e=>{
             console.error('❌ DIAG:', e.message);
-            process.exit(1);
-          });
-          NODE
-
-      - name: DEBUG raw football-data matches
-        env:
-          FD_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
-        run: |
-          node - <<'NODE'
-          const now=new Date();
-          const from=new Date(
-            now.getTime() - 48*60*60*1000
-          );
-
-          const pad=n=>
-            String(n).padStart(2,'0');
-
-          const dstr=d=>
-            `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
-
-          const url=
-            `https://api.football-data.org/v4/competitions/SA/matches?dateFrom=${dstr(from)}&dateTo=${dstr(now)}`;
-
-          (async()=>{
-
-            const r=await fetch(
-              url,
-              {
-                headers:{
-                  'X-Auth-Token':process.env.FD_TOKEN,
-                  'Accept':'application/json',
-                  'User-Agent':'fantacena-debug'
-                }
-              }
-            );
-
-            const text=await r.text();
-
-            if(!r.ok){
-              throw new Error(
-                `football-data HTTP ${r.status}: ${text.slice(0,500)}`
-              );
-            }
-
-            const j=JSON.parse(text);
-
-            console.log('========================================');
-            console.log('===== RAW FOOTBALL-DATA MATCHES ========');
-            console.log('URL:',url);
-            console.log('MATCHES:',(j.matches||[]).length);
-            console.log('========================================');
-
-            for(const m of (j.matches||[])){
-
-              console.log(
-                `${m.homeTeam?.name || '?'} - ${m.awayTeam?.name || '?'}`,
-                '| STATUS:',m.status,
-                '| DATA:',m.utcDate,
-                '| SCORE:',JSON.stringify(m.score)
-              );
-            }
-
-            console.log('========================================');
-            console.log('========== FINE RAW ====================');
-            console.log('========================================');
-
-          })().catch(e=>{
-            console.error('❌ DEBUG:',e.message);
             process.exit(1);
           });
           NODE
@@ -296,17 +217,12 @@ jobs:
           }
 
           for(const [from,to] of aliasPairs){
-            TEAM_ALIAS.set(
-              cleanName(from).toLowerCase(),
-              to
-            );
+            TEAM_ALIAS.set(cleanName(from).toLowerCase(),to);
           }
 
           const normTeam=s=>{
             const n=cleanName(s);
-
             if(!n) return '';
-
             return TEAM_ALIAS.get(n.toLowerCase()) || n;
           };
 
@@ -316,16 +232,9 @@ jobs:
             timeZone:TZ
           });
 
-          console.log(
-            '⏱️ Local:',
-            fmtLocal.format(new Date()),
-            '| UTC:',
-            new Date().toISOString()
-          );
+          console.log('⏱️ Local:',fmtLocal.format(new Date()),'| UTC:',new Date().toISOString());
 
-          const ORDER=(
-            String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc'
-          ) ? 'desc' : 'asc';
+          const ORDER=(String(process.env.UPCOMING_ORDER||'asc').toLowerCase()==='desc') ? 'desc' : 'asc';
 
           const cmpUpcoming=(a,b)=>{
             const ta=Date.parse(a.start||'');
@@ -341,82 +250,47 @@ jobs:
             return (ah+aw).localeCompare(bh+bw);
           };
 
-          const sleep=ms=>new Promise(
-            r=>setTimeout(r,ms)
-          );
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-          async function fetchRetry(
-            u,
-            opt={},
-            {tries=5,base=400}={}
-          ){
+          async function fetchRetry(u,opt={}, {tries=5,base=400}={}){
             for(let i=0;;i++){
-
               const r=await fetch(u,opt).catch(e=>{
-                throw new Error(
-                  `${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`
-                );
+                throw new Error(`${opt.method||'GET'} fetch-failed ${u} :: ${e.message||e}`);
               });
 
               if(r.ok) return r;
 
-              if(
-                ![429,500,502,503,504].includes(r.status)
-                ||
-                i>=tries-1
-              ){
-                const t=await r.text().catch(()=>'');
-
-                throw new Error(
-                  `${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`
-                );
+              if(![429,500,502,503,504].includes(r.status) || i>=tries-1){
+                const t=await r.text().catch(()=> '');
+                throw new Error(`${opt.method||'GET'} ${r.status} ${u} ${t.slice(0,300).replace(/\s+/g,' ')}`);
               }
 
-              await sleep(
-                Math.round(
-                  base*Math.pow(2,i)
-                )
-              );
+              await sleep(Math.round(base*Math.pow(2,i)));
             }
           }
 
           async function httpFD(u){
-            const r=await fetchRetry(
-              u,
-              {headers:HEAD_FD}
-            );
-
+            const r=await fetchRetry(u,{headers:HEAD_FD});
             return r.json();
           }
 
           async function gh(u,opt={}){
-            return fetchRetry(
-              u,
-              {
-                ...opt,
-                headers:{
-                  ...HEAD_GH,
-                  ...(opt.headers||{})
-                }
+            return fetchRetry(u,{
+              ...opt,
+              headers:{
+                ...HEAD_GH,
+                ...(opt.headers||{})
               }
-            );
+            });
           }
 
           async function readCurrent(){
-            const r=await gh(
-              `https://api.github.com/gists/${process.env.GIST_ID}`
-            );
-
+            const r=await gh(`https://api.github.com/gists/${process.env.GIST_ID}`);
             const j=await r.json();
-
-            const f=j.files?.[
-              process.env.GIST_FILE||'Classifica.json'
-            ];
+            const f=j.files?.[process.env.GIST_FILE||'Classifica.json'];
 
             try{
-              return f && f.content
-                ? JSON.parse(f.content)
-                : {};
+              return f && f.content ? JSON.parse(f.content) : {};
             }catch{
               return {};
             }
@@ -426,76 +300,37 @@ jobs:
             const body={
               files:{
                 [process.env.GIST_FILE||'Classifica.json']:{
-                  content:JSON.stringify(
-                    payload,
-                    null,
-                    2
-                  )
+                  content:JSON.stringify(payload,null,2)
                 }
               }
             };
 
-            const url=
-              `https://api.github.com/gists/${process.env.GIST_ID}`;
+            const url=`https://api.github.com/gists/${process.env.GIST_ID}`;
 
-            const r=await gh(
-              url,
-              {
-                method:'PATCH',
-                headers:{
-                  'content-type':'application/json'
-                },
-                body:JSON.stringify(body)
-              }
-            );
+            const r=await gh(url,{
+              method:'PATCH',
+              headers:{'content-type':'application/json'},
+              body:JSON.stringify(body)
+            });
 
             if(!r.ok){
-              const txt=await r.text().catch(()=>'');
-
-              throw new Error(
-                `PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`
-              );
+              const txt=await r.text().catch(()=> '');
+              throw new Error(`PATCH ${r.status} ${url} ${txt.slice(0,300).replace(/\s+/g,' ')}`);
             }
           }
 
-          const rank=s=>
-            s==='post'
-              ?3
-              :s==='in'
-                ?2
-                :s==='pre'
-                  ?1
-                  :0;
-
-          const asNum=v=>
-            Number.isFinite(Number(v))
-              ?Number(v)
-              :0;
+          const rank=s=>s==='in'?3:s==='post'?2:s==='pre'?1:0;
+          const asNum=v=>Number.isFinite(Number(v)) ? Number(v) : 0;
 
           async function fetchStandings(){
-
-            const j=await httpFD(
-              `${FD}/competitions/${COMP}/standings`
-            );
-
-            const t=
-              j.standings
-                ?.find(s=>/TOTAL/i.test(s.type))
-                ?.table
-              || [];
+            const j=await httpFD(`${FD}/competitions/${COMP}/standings`);
+            const t=j.standings?.find(s=>/TOTAL/i.test(s.type))?.table || [];
 
             const rows=[];
             const seen=new Set();
 
             for(const r of t){
-
-              const team=normTeam(
-                r.team?.shortName
-                ||
-                r.team?.name
-                ||
-                r.team?.tla
-              );
+              const team=normTeam(r.team?.shortName || r.team?.name || r.team?.tla);
 
               if(!TARGET_SET.has(team)) continue;
               if(seen.has(team)) continue;
@@ -510,7 +345,6 @@ jobs:
             }
 
             for(const team of TARGET_TEAMS){
-
               if(!seen.has(team)){
                 rows.push({
                   team,
@@ -520,279 +354,97 @@ jobs:
               }
             }
 
-            const played=
-              rows.map(r=>r.played);
-
-            const giornata=
-              Math.max(0,...played);
+            const played=rows.map(r=>r.played);
+            const giornata=Math.max(0,...played);
 
             return {
               giornata,
-              teams:
-                rows.map(r=>r.team),
-              pos_real:
-                rows.map((_,i)=>i+1),
+              teams:rows.map(r=>r.team),
+              pos_real:rows.map((_,i)=>i+1),
               played,
-              points:
-                rows.map(r=>r.points)
+              points:rows.map(r=>r.points)
             };
           }
 
           async function fetchMatches3Days(){
-
             const now=new Date();
+            const cutoff=new Date(now.getTime()-72*60*60*1000);
 
-            const cutoff=
-              new Date(
-                now.getTime()
-                -
-                72*60*60*1000
-              );
+            const pad=v=>String(v).padStart(2,'0');
+            const dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
 
-            const pad=v=>
-              String(v).padStart(2,'0');
+            const j=await httpFD(`${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`);
 
-            const dstr=d=>
-              `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
-
-            const j=await httpFD(
-              `${FD}/competitions/${COMP}/matches?dateFrom=${dstr(cutoff)}&dateTo=${dstr(now)}`
-            );
-
-            const rows=
-              (j.matches||[])
-                .map(m=>({
-                  home:normTeam(
-                    m.homeTeam?.shortName
-                    ||
-                    m.homeTeam?.name
-                    ||
-                    m.homeTeam?.tla
-                  ),
-
-                  away:normTeam(
-                    m.awayTeam?.shortName
-                    ||
-                    m.awayTeam?.name
-                    ||
-                    m.awayTeam?.tla
-                  ),
-
-                  sh:
-                    m.score?.fullTime?.home
-                    ??
-                    m.score?.halfTime?.home
-                    ??
-                    null,
-
-                  sa:
-                    m.score?.fullTime?.away
-                    ??
-                    m.score?.halfTime?.away
-                    ??
-                    null,
-
-                  status:
-                    m.status==='FINISHED'
-                      ?'post'
-                      :(
-                        /IN_PLAY|PAUSED/.test(
-                          String(m.status||'')
-                        )
-                          ?'in'
-                          :'pre'
-                      ),
-
-                  start:
-                    m.utcDate||null
-                }))
-
-                .filter(
-                  r=>
-                    TARGET_SET.has(r.home)
-                    &&
-                    TARGET_SET.has(r.away)
-                );
+            const rows=(j.matches||[])
+              .map(m=>({
+                home:normTeam(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
+                away:normTeam(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
+                sh:m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? null,
+                sa:m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? null,
+                status:/FINISHED|IN_PLAY|PAUSED/.test(m.status) ? (m.status==='FINISHED' ? 'post' : 'in') : 'pre',
+                start:m.utcDate||null
+              }))
+              .filter(r=>TARGET_SET.has(r.home) && TARGET_SET.has(r.away));
 
             const latest=new Map();
 
             for(const r of rows){
+              const k=`${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
+              const p=latest.get(k);
 
-              const k=
-                `${r.home.toLowerCase()}|${r.away.toLowerCase()}`;
-
-              const p=
-                latest.get(k);
-
-              if(
-                !p
-                ||
-                rank(r.status)>rank(p.status)
-              ){
+              if(!p || rank(r.status)>rank(p.status)){
                 latest.set(k,r);
-
-              }else if(
-                p
-                &&
-                rank(r.status)===rank(p.status)
-              ){
-
-                const merged={
-                  ...p,
-                  ...r
-                };
-
-                if(
-                  p.sh!=null
-                  &&
-                  r.sh==null
-                ){
-                  merged.sh=p.sh;
-                }
-
-                if(
-                  p.sa!=null
-                  &&
-                  r.sa==null
-                ){
-                  merged.sa=p.sa;
-                }
-
-                latest.set(k,merged);
               }
             }
 
             return Array.from(latest.values())
               .filter(r=>{
-
                 if(!r.start) return false;
-
-                const dt=
-                  new Date(r.start);
-
-                return (
-                  dt>=cutoff
-                  &&
-                  dt<=now
-                );
+                const dt=new Date(r.start);
+                return dt>=cutoff && dt<=now;
               })
-
-              .sort(
-                (a,b)=>
-                  String(a.start)
-                    .localeCompare(
-                      String(b.start)
-                    )
-              );
+              .sort((a,b)=>String(a.start).localeCompare(String(b.start)));
           }
 
           async function fetchUpcomingNext5Days(){
-
             const now=new Date();
+            const end=new Date(now.getTime()+5*24*60*60*1000);
 
-            const end=
-              new Date(
-                now.getTime()
-                +
-                5*24*60*60*1000
-              );
+            const pad=v=>String(v).padStart(2,'0');
+            const dstr=d=>`${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
 
-            const pad=v=>
-              String(v).padStart(2,'0');
-
-            const dstr=d=>
-              `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
-
-            let j=await httpFD(
-              `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${dstr(now)}&dateTo=${dstr(end)}`
-            );
+            let j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED&dateFrom=${dstr(now)}&dateTo=${dstr(end)}`);
 
             if(!j.matches?.length){
-
-              j=await httpFD(
-                `${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`
-              );
+              j=await httpFD(`${FD}/competitions/${COMP}/matches?status=SCHEDULED,TIMED`);
             }
 
-            const BAD=
-              new Set([
-                'POSTPONED',
-                'CANCELED',
-                'SUSPENDED',
-                'AWARDED'
-              ]);
+            const BAD=new Set(['POSTPONED','CANCELED','SUSPENDED','AWARDED']);
 
-            let rows=
-              (j.matches||[])
+            let rows=(j.matches||[])
+              .filter(m=>!BAD.has(String(m.status||'').toUpperCase()))
+              .map(m=>({
+                home:normTeam(m.homeTeam?.shortName||m.homeTeam?.name||m.homeTeam?.tla),
+                away:normTeam(m.awayTeam?.shortName||m.awayTeam?.name||m.awayTeam?.tla),
+                sh:null,
+                sa:null,
+                status:'pre',
+                start:m.utcDate||null
+              }))
+              .filter(r=>TARGET_SET.has(r.home) && TARGET_SET.has(r.away))
+              .filter(r=>{
+                const t=Date.parse(r.start||'');
+                return Number.isFinite(t) && t>=now.getTime() && t<=end.getTime();
+              })
+              .sort(cmpUpcoming);
 
-                .filter(
-                  m=>
-                    !BAD.has(
-                      String(
-                        m.status||''
-                      ).toUpperCase()
-                    )
-                )
-
-                .map(m=>({
-                  home:normTeam(
-                    m.homeTeam?.shortName
-                    ||
-                    m.homeTeam?.name
-                    ||
-                    m.homeTeam?.tla
-                  ),
-
-                  away:normTeam(
-                    m.awayTeam?.shortName
-                    ||
-                    m.awayTeam?.name
-                    ||
-                    m.awayTeam?.tla
-                  ),
-
-                  sh:null,
-                  sa:null,
-                  status:'pre',
-                  start:m.utcDate||null
-                }))
-
-                .filter(
-                  r=>
-                    TARGET_SET.has(r.home)
-                    &&
-                    TARGET_SET.has(r.away)
-                )
-
-                .filter(r=>{
-
-                  const t=
-                    Date.parse(
-                      r.start||''
-                    );
-
-                  return (
-                    Number.isFinite(t)
-                    &&
-                    t>=now.getTime()
-                    &&
-                    t<=end.getTime()
-                  );
-                })
-
-                .sort(cmpUpcoming);
-
-            if(ORDER==='desc'){
-              rows=rows.reverse();
-            }
+            if(ORDER==='desc') rows=rows.reverse();
 
             const seen=new Set();
             const out=[];
 
             for(const r of rows){
-
-              const k=
-                `${r.home}|${r.away}|${r.start||""}`;
+              const k=`${r.home}|${r.away}|${r.start||""}`;
 
               if(!seen.has(k)){
                 seen.add(k);
@@ -804,430 +456,97 @@ jobs:
           }
 
           function isZeroStartCurrent(current){
+            const g=asNum(current.giornata);
+            const played=Array.isArray(current.played) ? current.played.map(asNum) : [];
+            const points=Array.isArray(current.points) ? current.points.map(asNum) : [];
 
-            const g=
-              asNum(current.giornata);
+            const allPlayedZero=played.length && played.every(v=>v===0);
+            const allPointsZero=points.length && points.every(v=>v===0);
 
-            const played=
-              Array.isArray(current.played)
-                ?current.played.map(asNum)
-                :[];
-
-            const points=
-              Array.isArray(current.points)
-                ?current.points.map(asNum)
-                :[];
-
-            const allPlayedZero=
-              played.length
-              &&
-              played.every(v=>v===0);
-
-            const allPointsZero=
-              points.length
-              &&
-              points.every(v=>v===0);
-
-            return (
-              g===0
-              &&
-              allPlayedZero
-              &&
-              allPointsZero
-            );
-          }
-
-          function matchKey(r){
-            return `${String(r&&r.home||'').toLowerCase()}|${String(r&&r.away||'').toLowerCase()}|${r&&r.start||''}`;
-          }
-
-          function mergeMatch(existing,incoming){
-
-            if(!existing) return incoming;
-            if(!incoming) return existing;
-
-            const oldRank=
-              rank(existing.status);
-
-            const newRank=
-              rank(incoming.status);
-
-            if(newRank<oldRank){
-              return existing;
-            }
-
-            if(newRank>oldRank){
-
-              const advanced={
-                ...existing,
-                ...incoming
-              };
-
-              if(
-                incoming.sh==null
-                &&
-                existing.sh!=null
-              ){
-                advanced.sh=
-                  existing.sh;
-              }
-
-              if(
-                incoming.sa==null
-                &&
-                existing.sa!=null
-              ){
-                advanced.sa=
-                  existing.sa;
-              }
-
-              return advanced;
-            }
-
-            const merged={
-              ...existing,
-              ...incoming
-            };
-
-            if(
-              existing.sh!=null
-              &&
-              incoming.sh==null
-            ){
-              merged.sh=
-                existing.sh;
-            }
-
-            if(
-              existing.sa!=null
-              &&
-              incoming.sa==null
-            ){
-              merged.sa=
-                existing.sa;
-            }
-
-            return merged;
+            return g===0 && allPlayedZero && allPointsZero;
           }
 
           (async()=>{
+            const current=await readCurrent();
 
-            const current=
-              await readCurrent();
+            const st=await fetchStandings();
+            const past72=await fetchMatches3Days();
+            const next=await fetchUpcomingNext5Days();
 
-            const st=
-              await fetchStandings();
-
-            const past72=
-              await fetchMatches3Days();
-
-            const next=
-              await fetchUpcomingNext5Days();
-
-            if(
-              isZeroStartCurrent(current)
-              &&
-              st.giornata>5
-            ){
-
-              console.log(
-                `🛑 Preseason guard attiva: Classifica.json resta azzerato. football-data giornata=${st.giornata}`
-              );
-
+            /*
+              Protezione pre-campionato:
+              se il Gist è azzerato e football-data restituisce una stagione vecchia
+              con tante partite giocate, non sovrascriviamo Classifica.json.
+            */
+            if(isZeroStartCurrent(current) && st.giornata>5){
+              console.log(`🛑 Preseason guard attiva: Classifica.json resta azzerato. football-data giornata=${st.giornata}`);
               return;
             }
 
-            const now=
-              new Date();
+            const key=r=>`${r.home}|${r.away}|${r.start||""}`;
+            const map=new Map();
 
-            const map=
-              new Map();
-
-            /*
-              Dal vecchio Gist manteniamo SOLO
-              le partite già definitivamente finite.
-            */
-            const previousMatches=[
-              ...(Array.isArray(current.results_raw)
-                ?current.results_raw
-                :[]),
-              ...(Array.isArray(current.upcoming_raw)
-                ?current.upcoming_raw
-                :[])
-            ];
-
-            for(const r of previousMatches){
-
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-                ||
-                r.status!=='post'
-              ){
-                continue;
+            for(const r of [...past72,...next]){
+              if(r && r.home && r.away){
+                map.set(key(r),r);
               }
-
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
-              );
             }
 
-            /*
-              Dati freschi ultime 72 ore.
-            */
-            for(const r of past72){
-
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-              ){
-                continue;
-              }
-
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
-              );
-            }
-
-            /*
-              Prossime partite.
-            */
-            for(const r of next){
-
-              if(
-                !r
-                ||
-                !r.home
-                ||
-                !r.away
-              ){
-                continue;
-              }
-
-              const k=
-                matchKey(r);
-
-              map.set(
-                k,
-                mergeMatch(
-                  map.get(k),
-                  r
-                )
-              );
-            }
-
-            const minKeep=
-              now.getTime()
-              -
-              96*60*60*1000;
-
-            const maxKeep=
-              now.getTime()
-              +
-              5*24*60*60*1000;
-
-            const results_raw=
-              [...map.values()]
-
-                .filter(r=>{
-
-                  const t=
-                    Date.parse(
-                      r&&r.start||''
-                    );
-
-                  return (
-                    Number.isFinite(t)
-                    &&
-                    t>=minKeep
-                    &&
-                    t<=maxKeep
-                  );
-                })
-
-                .sort(
-                  (a,b)=>
-                    String(
-                      a.start||''
-                    ).localeCompare(
-                      String(
-                        b.start||''
-                      )
-                    )
-                );
-
-            const upcoming_raw=
-              results_raw
-
-                .filter(r=>{
-
-                  const t=
-                    Date.parse(
-                      r&&r.start||''
-                    );
-
-                  return (
-                    r.status==='pre'
-                    &&
-                    Number.isFinite(t)
-                    &&
-                    t>=now.getTime()
-                  );
-                })
-
-                .sort(
-                  cmpUpcoming
-                );
-
-            if(ORDER==='desc'){
-              upcoming_raw.reverse();
-            }
+            const results_raw=[...map.values()];
+            const now=new Date();
 
             const payload={
               ...current,
 
-              giornata:
-                st.giornata,
+              giornata:st.giornata,
 
-              teams:
-                st.teams,
-
-              pos_real:
-                st.pos_real,
-
-              played:
-                st.played,
-
-              points:
-                st.points,
+              teams:st.teams,
+              pos_real:st.pos_real,
+              played:st.played,
+              points:st.points,
 
               results_raw,
-
-              upcoming_raw,
+              upcoming_raw:next,
 
               counts:{
-                pre:
-                  results_raw.filter(
-                    r=>r.status==='pre'
-                  ).length,
-
-                in:
-                  results_raw.filter(
-                    r=>r.status==='in'
-                  ).length,
-
-                post:
-                  results_raw.filter(
-                    r=>r.status==='post'
-                  ).length
+                pre:results_raw.filter(r=>r.status==='pre').length,
+                in:results_raw.filter(r=>r.status==='in').length,
+                post:results_raw.filter(r=>r.status==='post').length
               },
 
-              synced_at:
-                now.toISOString(),
+              synced_at:now.toISOString(),
 
               _meta:{
-                timezone:
-                  TZ,
-
-                order_upcoming:
-                  ORDER,
-
-                now_local:
-                  new Intl.DateTimeFormat(
-                    'sv-SE',
-                    {
-                      timeZone:TZ,
-                      hour12:false,
-                      dateStyle:'short',
-                      timeStyle:'medium'
-                    }
-                  ).format(now),
-
-                now_utc:
-                  now.toISOString(),
-
-                run_id:
-                  process.env.GITHUB_RUN_ID
-                  ||
-                  null,
-
-                run_attempt:
-                  process.env.GITHUB_RUN_ATTEMPT
-                  ||
-                  null,
-
-                repo:
-                  process.env.GITHUB_REPOSITORY
-                  ||
-                  null,
-
-                workflow:
-                  process.env.GITHUB_WORKFLOW
-                  ||
-                  null,
-
-                sha:
-                  process.env.GITHUB_SHA
-                  ||
-                  null
+                timezone:TZ,
+                order_upcoming:ORDER,
+                now_local:new Intl.DateTimeFormat('sv-SE',{
+                  timeZone:TZ,
+                  hour12:false,
+                  dateStyle:'short',
+                  timeStyle:'medium'
+                }).format(now),
+                now_utc:now.toISOString(),
+                run_id:process.env.GITHUB_RUN_ID || null,
+                run_attempt:process.env.GITHUB_RUN_ATTEMPT || null,
+                repo:process.env.GITHUB_REPOSITORY || null,
+                workflow:process.env.GITHUB_WORKFLOW || null,
+                sha:process.env.GITHUB_SHA || null
               },
 
               _sources:{
-                provider:
-                  'football-data.org',
-
-                standings:
-                  'football-data_standings_normalized_fantacena_2027',
-
-                results:
-                  'football-data_matches_past72h_normalized_fantacena_2027',
-
-                upcoming:
-                  `football-data_matches_next_5d_${ORDER}_normalized_fantacena_2027`,
-
-                scorers:
-                  'manual'
+                provider:'football-data.org',
+                standings:'football-data_standings_normalized_fantacena_2027',
+                results:'football-data_matches_past72h_normalized_fantacena_2027',
+                upcoming:`football-data_matches_next_5d_${ORDER}_normalized_fantacena_2027`,
+                scorers:'manual'
               }
             };
 
             await writeGist(payload);
 
-            console.log(
-              `✅ Gist aggiornato | giornata=${payload.giornata} | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`
-            );
-
+            console.log(`✅ Gist aggiornato | giornata=${payload.giornata} | prossime partite: 5 giorni (${ORDER}) | results_raw=${results_raw.length} | pre:${payload.counts.pre} in:${payload.counts.in} post:${payload.counts.post}`);
           })().catch(e=>{
-
-            console.error(
-              '❌ FATAL:',
-              e.stack
-              ||
-              e.message
-              ||
-              String(e)
-            );
-
+            console.error('❌ FATAL:', e.stack || e.message || String(e));
             process.exit(1);
           });
-
           NODE
