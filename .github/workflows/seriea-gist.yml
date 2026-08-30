@@ -1,23 +1,7 @@
 name: Update Gist (Serie A) — 72h results + next fixtures (orderable)
 
 on:
-  schedule:
-    # Venerdì
-    - cron: "2-57/5 16-23 * * 5"
-
-    # Sabato a partire dalle 15:00 ora di Roma
-    - cron: "2-57/5 13-23 * 4-10 6"
-    - cron: "2-57/5 14-23 * 11,12,1,2,3 6"
-
-    # Lunedì
-    - cron: "2-57/5 16-23 * * 1"
-
-    # Domenica
-    - cron: "30-55/5 10 * * 0"
-    - cron: "2-57/5 11-21 * * 0"
-    - cron: "0-30/5 22 * * 0"
-    - cron: "2-57/5 23 * * 0"
-
+  
   workflow_dispatch:
     inputs:
       upcoming_order:
