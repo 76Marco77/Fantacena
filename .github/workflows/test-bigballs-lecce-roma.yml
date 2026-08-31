@@ -1,0 +1,148 @@
+name: Test BigBalls Lecce Roma events
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-events:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Cerca Lecce-Roma e verifica eventi/gol
+        env:
+          BIGBALLS_API_KEY: ${{ secrets.BIGBALLS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BIGBALLS_API_KEY:-}" ]; then
+            echo "ERRORE: secret BIGBALLS_API_KEY non trovato."
+            exit 1
+          fi
+
+          AUTH="Authorization: Bearer ${BIGBALLS_API_KEY}"
+
+          echo "=== 1) CERCO LECCE-ROMA NELL'ELENCO PARTITE SERIE A ==="
+
+          HTTP_CODE="$(
+            curl -sS \
+              -o /tmp/bbs_matches.json \
+              -w "%{http_code}" \
+              -H "${AUTH}" \
+              "https://api.bigballsdata.com/v1/matches?sport=football&league=serie-a&limit=100"
+          )"
+
+          echo "HTTP elenco partite: ${HTTP_CODE}"
+
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "Risposta API:"
+            cat /tmp/bbs_matches.json
+            exit 1
+          fi
+
+          echo
+          echo "--- Partite che contengono Lecce o Roma ---"
+          jq '
+            .data
+            | map(select(
+                (
+                  ((.home.name // .home_team // .home // "") | tostring | ascii_downcase)
+                  | contains("lecce")
+                )
+                or
+                (
+                  ((.away.name // .away_team // .away // "") | tostring | ascii_downcase)
+                  | contains("lecce")
+                )
+                or
+                (
+                  ((.home.name // .home_team // .home // "") | tostring | ascii_downcase)
+                  | contains("roma")
+                )
+                or
+                (
+                  ((.away.name // .away_team // .away // "") | tostring | ascii_downcase)
+                  | contains("roma")
+                )
+              ))
+          ' /tmp/bbs_matches.json
+
+          MATCH_ID="$(
+            jq -r '
+              .data
+              | map(select(
+                  (
+                    ((.home.name // .home_team // .home // "") | tostring | ascii_downcase | contains("lecce"))
+                    and
+                    ((.away.name // .away_team // .away // "") | tostring | ascii_downcase | contains("roma"))
+                  )
+                  or
+                  (
+                    ((.home.name // .home_team // .home // "") | tostring | ascii_downcase | contains("roma"))
+                    and
+                    ((.away.name // .away_team // .away // "") | tostring | ascii_downcase | contains("lecce"))
+                  )
+                ))
+              | first
+              | .id // empty
+            ' /tmp/bbs_matches.json
+          )"
+
+          if [ -z "${MATCH_ID}" ]; then
+            echo
+            echo "ERRORE: Lecce-Roma non trovata nell'elenco restituito."
+            echo "Nessuna modifica è stata fatta: questo è solo un test."
+            exit 1
+          fi
+
+          echo
+          echo "Match ID trovato: ${MATCH_ID}"
+
+          echo
+          echo "=== 2) EVENTI DELLA PARTITA ==="
+
+          EVENTS_CODE="$(
+            curl -sS \
+              -o /tmp/bbs_events.json \
+              -w "%{http_code}" \
+              -H "${AUTH}" \
+              "https://api.bigballsdata.com/v1/matches/${MATCH_ID}/events?sport=football"
+          )"
+
+          echo "HTTP eventi: ${EVENTS_CODE}"
+
+          if [ "${EVENTS_CODE}" != "200" ]; then
+            echo "Risposta endpoint eventi:"
+            cat /tmp/bbs_events.json
+            exit 1
+          fi
+
+          echo
+          echo "--- EVENTI COMPLETI ---"
+          jq '.' /tmp/bbs_events.json
+
+          echo
+          echo "=== 3) CERCO MALEN NEGLI EVENTI ==="
+          jq '
+            [
+              .. | objects
+              | select(
+                  (
+                    [
+                      .player_name?,
+                      .player?,
+                      .name?,
+                      .scorer?,
+                      .description?
+                    ]
+                    | map(select(. != null) | tostring)
+                    | join(" ")
+                    | ascii_downcase
+                    | contains("malen")
+                  )
+                )
+            ]
+          ' /tmp/bbs_events.json
+
+          echo
+          echo "TEST TERMINATO."
+          echo "Controlla se negli eventi compaiono i 2 gol di Malen."
