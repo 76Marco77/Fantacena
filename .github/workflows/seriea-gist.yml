@@ -61,6 +61,8 @@ jobs:
           const COMP='SA';
           const TZ='Europe/Rome';
           const MAX_SINGLE_MATCH_CHECKS=4;
+          const SCHEDINA_SEASON=2026;
+          const schedinaFinals=new Map();
 
           const HEAD_FD={
             'X-Auth-Token':process.env.FD_TOKEN,
@@ -236,16 +238,14 @@ jobs:
                 'Classifica.json'
               ];
 
-            try{
-
-              return f?.content
-                ? JSON.parse(f.content)
-                : {};
-
-            }catch{
-
-              return {};
+            if(!f) return {};
+            // Keep the previous archive intact if the current Gist cannot be read.
+            const content=f.truncated ? await (await gh(f.raw_url)).text() : f.content;
+            const current=JSON.parse(content);
+            if(!current || typeof current!=='object' || Array.isArray(current)){
+              throw new Error('Classifica.json non valido');
             }
+            return current;
           }
 
           async function writeGist(payload){
@@ -500,6 +500,51 @@ jobs:
               +
               `${String(r?.away||'').toLowerCase()}`
             );
+          }
+
+          function rememberSchedinaFinal(match){
+            const start=Date.parse(match?.start);
+            if(
+              match?.status!=='post' ||
+              !TARGET_SET.has(match.home) || !TARGET_SET.has(match.away) ||
+              !Number.isInteger(match.matchday) || match.matchday<1 || match.matchday>38 ||
+              !Number.isInteger(match.sh) || match.sh<0 ||
+              !Number.isInteger(match.sa) || match.sa<0 ||
+              !Number.isFinite(start) ||
+              start<Date.UTC(SCHEDINA_SEASON,6,1) || start>=Date.UTC(SCHEDINA_SEASON+1,6,1)
+            ) return;
+
+            const key=matchKey(match);
+            const existing=schedinaFinals.get(key);
+            if(Date.parse(existing?.provider_last_updated)>(Date.parse(match.provider_last_updated)||0)) return;
+            schedinaFinals.set(key,match);
+          }
+
+          function collectProviderMatch(raw){
+            const match=normalizeProviderMatch(raw);
+            if(match.status==='post'){
+              // The live feed can fall back to half-time scores. Archive only a complete final.
+              rememberSchedinaFinal({
+                ...match,
+                sh:raw.score?.fullTime?.home ?? raw.score?.regularTime?.home,
+                sa:raw.score?.fullTime?.away ?? raw.score?.regularTime?.away
+              });
+            }
+            return match;
+          }
+
+          async function refreshSchedinaArchive(current,now){
+            const today=dstr(now);
+            if(current?.season===SCHEDINA_SEASON && current.refreshed_on===today) return today;
+            try{
+              const data=await httpFD(`${FD}/competitions/${COMP}/matches?season=${SCHEDINA_SEASON}&status=FINISHED`);
+              if(!Array.isArray(data.matches)) throw new Error('Lista risultati assente');
+              data.matches.forEach(collectProviderMatch);
+              return today;
+            }catch(e){
+              console.warn('Archivio risultati Schedina: aggiornamento da riprovare',e.message);
+              return current?.season===SCHEDINA_SEASON ? current.refreshed_on ?? null : null;
+            }
           }
 
           function mergeMatch(
@@ -837,7 +882,7 @@ jobs:
               []
             )
               .map(
-                normalizeProviderMatch
+                collectProviderMatch
               )
               .filter(
                 r=>
@@ -872,7 +917,7 @@ jobs:
               []
             )
               .map(
-                normalizeProviderMatch
+                collectProviderMatch
               )
               .filter(
                 r=>
@@ -959,7 +1004,7 @@ jobs:
                   );
 
                 const fresh=
-                  normalizeProviderMatch(
+                  collectProviderMatch(
                     raw
                   );
 
@@ -1033,6 +1078,11 @@ jobs:
 
             const current=
               await readCurrent();
+
+            const schedinaArchive=current.schedina_final_results;
+            if(schedinaArchive?.season===SCHEDINA_SEASON && Array.isArray(schedinaArchive.matches)){
+              schedinaArchive.matches.forEach(rememberSchedinaFinal);
+            }
 
             const st=
               await fetchStandings();
@@ -1174,6 +1224,8 @@ jobs:
               now
             );
 
+            const schedinaArchiveDate=await refreshSchedinaArchive(schedinaArchive,now);
+
             const minKeep=
               now.getTime()
               -
@@ -1292,6 +1344,12 @@ jobs:
               results_raw,
 
               upcoming_raw,
+
+              schedina_final_results:{
+                season:SCHEDINA_SEASON,
+                refreshed_on:schedinaArchiveDate,
+                matches:[...schedinaFinals.values()].sort((a,b)=>a.start.localeCompare(b.start))
+              },
 
               counts:{
 
